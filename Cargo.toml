@@ -1,0 +1,13 @@
+[package]
+name = "paranukos"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# 引入穩定且功能完備的 uefi 核心庫
+uefi = "0.41"
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
