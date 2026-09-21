@@ -2,5 +2,5 @@
 target = "x86_64-unknown-uefi"
 
 [target.x86_64-unknown-uefi]
-# 自动调用 Fedora 的 EDK2 (OVMF) 固件，并以纯文本控制台重定向模式启动
-runner = "qemu-system-x86_64 -bios /usr/share/edk2/ovmf/OVMF_CODE.fd -net none -nographic -drive format=raw,file="
+# 告诉 Cargo，编译完后不要直接调 QEMU，而是把固件路径传给我们的脚本
+runner = "sh run-qemu.sh"
