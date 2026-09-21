@@ -2,5 +2,5 @@
 target = "x86_64-unknown-uefi"
 
 [target.x86_64-unknown-uefi]
-# 移除前面的 sh，允许脚本通过自身的 Shebang (#!/bin/bash) 释放全部 Bash 特性
+# 编译后交由本脚本，以 UEFI kernel (-kernel) 方式直接加载到 OVMF/QEMU
 runner = "./run-qemu.sh"
