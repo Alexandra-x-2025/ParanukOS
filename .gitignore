@@ -14,3 +14,6 @@
 
 # 忽略锁文件
 skills-lock.json
+
+# 不推送到远程：项目规范文档（仅本地开发参考）
+AGENTS.md
