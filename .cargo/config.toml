@@ -2,5 +2,7 @@
 target = "x86_64-unknown-uefi"
 
 [target.x86_64-unknown-uefi]
-# 编译后交由本脚本，以 UEFI kernel (-kernel) 方式直接加载到 OVMF/QEMU
-runner = "./run-qemu.sh"
+# 直接调用 QEMU + OVMF/EDK2，以 UEFI kernel (-kernel) 方式启动编译产物。
+# cargo 的 runner 不会展开 $1 / $CARGO_BIN_EXE_*（均保持字面量），故硬编码 release 输出路径；
+#   -nographic 启用纯文本控制台重定向模式（OVMF 会将 UEFI stdout 重定向到该控制台）。
+runner = "qemu-system-x86_64 -kernel target/x86_64-unknown-uefi/release/paranukos.efi -bios /usr/share/edk2/ovmf/OVMF_CODE.fd -net none -nographic"
