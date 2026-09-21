@@ -2,5 +2,5 @@
 target = "x86_64-unknown-uefi"
 
 [target.x86_64-unknown-uefi]
-# 告诉 Cargo，编译完后不要直接调 QEMU，而是把固件路径传给我们的脚本
-runner = "sh run-qemu.sh"
+# 移除前面的 sh，允许脚本通过自身的 Shebang (#!/bin/bash) 释放全部 Bash 特性
+runner = "./run-qemu.sh"
