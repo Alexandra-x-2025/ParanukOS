@@ -3,7 +3,14 @@
 *.bin
 *.iso
 
-# 过滤 Pi Agent 的本地临时缓存，但保留你的技能包和配置
+# 过滤 Pi Agent 的本地临时缓存
 .pi/agent/cache/
 .pi/agent/logs/
-node_modules/
+
+# 忽略本地 AI Agent 工具目录（技能包、配置、依赖）
+.agents/
+.claude/
+.pi/
+
+# 忽略锁文件
+skills-lock.json
