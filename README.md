@@ -1,5 +1,7 @@
 # ParanukOS
 
+[English Version] | [中文版本](README_CN.md)
+
 ParanukOS is a high-reliability, Rust-based microkernel operating system designed for modern hardware and secure application execution. By leveraging a microkernel architecture and a user-state focused service model, ParanukOS aims to build a robust platform that supports both low-level systems programming and high-level Web/Wasm applications.
 
 ## 🔗 Reference Project

@@ -1,6 +1,6 @@
 # ParanukOS 项目愿景
 
-[English Version] | [中文版本](README_CN.md)
+[English Version] | [中文版本](VISION_CN.md)
 
 ParanukOS 是一个基于 Rust 开发的高可靠性微内核操作系统，旨在为现代硬件提供安全且稳定的计算基础。通过采用微内核架构和用户态服务模型，ParanukOS 致力于构建一个既能支持底层系统编程，又能承载高层 Web/Wasm 应用的稳固平台。
 
