@@ -1,25 +1,27 @@
-# 过滤操作系统编译的中间体
-*.o
+# Rust Specific
+/target/
+Cargo.lock (Optional: keep if you want to lock dependency versions)
+**/*.rs.bk
+**/*.swp
+**/*.swo
+
+# OS Development / QEMU
 *.bin
+*.img
 *.iso
+*.qcow2
+*.vmdk
+*.log
+*.dump
 
-# 过滤 Pi Agent 的本地临时缓存
-.pi/agent/cache/
-.pi/agent/logs/
-
-# 忽略本地 AI Agent 工具目录（技能包、配置、依赖）
-.agents/
-.claude/
+# IDE & Environment
+.vscode/
+.idea/
+.env
+.DS_Store
 .pi/
 
-# 忽略锁文件
-skills-lock.json
-
-# 不推送到远程：项目规范文档（仅本地开发参考）
-AGENTS.md
-
-# Rust 构建产物与本地配置
-/target
-**/*.rs.bk
-Cargo.lock
-.cargo/config.toml.local
+# Build Artifacts
+build/
+dist/
+out/
