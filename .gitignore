@@ -25,3 +25,6 @@ Cargo.lock (Optional: keep if you want to lock dependency versions)
 build/
 dist/
 out/
+.claude/
+.claude/
+.claude/
