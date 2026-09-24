@@ -5,7 +5,7 @@
 
 use core::panic::PanicInfo;
 
-/// 定义内核崩溃时的行为（在 no_std 环境下是强制要求的）
+/// 这个函数将在 panic 时被调用
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     loop {}
