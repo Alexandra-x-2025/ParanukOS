@@ -1,6 +1,6 @@
 # ParanukOS 贡献指南
 
-[English Version] | [中文版本](CONTRIBUTING_CN.md)
+[English] | [中文](CONTRIBUTING_CN.md)
 
 欢迎加入 **ParanukOS** 项目！我们非常高兴你能参与构建这个基于 Rust 的高可靠性微内核操作系统。
 
