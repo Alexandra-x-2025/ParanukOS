@@ -1,13 +1,18 @@
 [package]
 name = "paranukos"
 version = "0.1.0"
+authors = ["Alexander"]
 edition = "2024"
 
 [dependencies]
-# 引入穩定且功能完備的 uefi 核心庫
-uefi = "0.41"
+
+[profile.dev]
+panic = "abort"
 
 [profile.release]
-opt-level = "z"
-lto = true
 panic = "abort"
+
+[[bin]]
+name = "paranukos"
+test = false
+bench = false
