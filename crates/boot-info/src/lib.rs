@@ -153,8 +153,13 @@ pub const EXIT_VALUE_BOOTLOADER_OK: u8 = 0x10;
 pub const EXIT_VALUE_LOAD_FAILURE: u8 = 0x11;
 /// 写入值：内核自检通过。
 pub const EXIT_VALUE_KERNEL_OK: u8 = 0x12;
-/// 写入值：内核自检失败。
+/// 写入值：内核自检失败（可预期的检查未通过，例如 `BootInfo` 非法）。
 pub const EXIT_VALUE_KERNEL_FAILURE: u8 = 0x13;
+/// 写入值：内核发生未处理异常或 panic（意外崩溃）。
+///
+/// 与 [`EXIT_VALUE_KERNEL_FAILURE`] 区分：39 表示"内核按预期判定失败"，
+/// 41 表示"内核自己崩了"——两者的排查方向完全不同。
+pub const EXIT_VALUE_KERNEL_FAULT: u8 = 0x14;
 
 /// QEMU 把写入 `isa-debug-exit` 的值转换为进程退出码：`(value << 1) | 1`。
 #[must_use]
@@ -170,6 +175,8 @@ pub const EXIT_CODE_LOAD_FAILURE: i32 = qemu_exit_code(EXIT_VALUE_LOAD_FAILURE);
 pub const EXIT_CODE_KERNEL_OK: i32 = qemu_exit_code(EXIT_VALUE_KERNEL_OK);
 /// 内核自检失败 → 39。
 pub const EXIT_CODE_KERNEL_FAILURE: i32 = qemu_exit_code(EXIT_VALUE_KERNEL_FAILURE);
+/// 内核未处理异常 / panic → 41。
+pub const EXIT_CODE_KERNEL_FAULT: i32 = qemu_exit_code(EXIT_VALUE_KERNEL_FAULT);
 
 #[cfg(test)]
 mod tests {
@@ -270,6 +277,9 @@ mod tests {
         assert_eq!(EXIT_CODE_LOAD_FAILURE, 35);
         assert_eq!(EXIT_CODE_KERNEL_OK, 37);
         assert_eq!(EXIT_CODE_KERNEL_FAILURE, 39);
+        assert_eq!(EXIT_CODE_KERNEL_FAULT, 41);
+        // "自检失败"与"内核崩溃"也必须可区分
+        assert_ne!(EXIT_CODE_KERNEL_FAILURE, EXIT_CODE_KERNEL_FAULT);
         // 33 与 37 必须不同，否则测试无法区分"引导器装完"与"内核真的跑了"
         assert_ne!(EXIT_CODE_BOOTLOADER_OK, EXIT_CODE_KERNEL_OK);
         assert_eq!(DEBUG_EXIT_PORT, 0xF4);

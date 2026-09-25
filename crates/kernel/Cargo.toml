@@ -9,3 +9,8 @@ publish = false
 [dependencies]
 # 与引导器共用同一份 BootInfo 定义（避免两侧 repr(C) 漂移）
 boot-info = { path = "../boot-info" }
+
+[features]
+# 仅用于测试：自检通过后故意执行 `ud2`，以覆盖异常处理器路径（退出码 41）。
+# 生产构建绝不启用。
+inject-fault = []
