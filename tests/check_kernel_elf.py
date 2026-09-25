@@ -5,7 +5,7 @@
 `e_type=ET_EXEC`、`e_machine=x86-64`、`e_entry` 落在某个可执行 `PT_LOAD` 段内。
 
 以及 docs/architecture/memory_subsystem.md §8.3：页对齐后的装载区间必须落在引导器的
-`MAX_KERNEL_PAGES` 预算内——M2 起内核带了静态页表竞技场（M2b 还会加页帧位图），
+`MAX_KERNEL_PAGES` 预算内——M2 起内核带了静态页表竞技场（M2b 加上 256 KiB 页帧位图），
 忘了提高预算的表现就是引导器以 35 退出。
 
 为什么不依赖工具链：`readelf`/`file` 的输出措辞随 binutils 版本变化，不适合作为
@@ -27,7 +27,7 @@ PF_X = 1
 PAGE = 4096
 
 # 必须与 src/bootloader/fs_loader.rs 的 MAX_KERNEL_PAGES 保持一致。
-MAX_KERNEL_PAGES = 128
+MAX_KERNEL_PAGES = 256
 
 
 class CheckError(Exception):

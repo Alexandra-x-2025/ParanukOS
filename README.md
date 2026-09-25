@@ -101,7 +101,15 @@ At runtime the kernel installs its own IDT and then builds and installs its **ow
 identity-mapped page tables** from the UEFI memory map in `BootInfo`: the first 2 MiB with 4 KiB
 pages, everything above with 2 MiB blocks, and only addresses that overlap RAM. Non-RAM addresses
 and page 0 are deliberately left not-present, so a stray or null access faults loudly (`#PF`)
-instead of silently touching firmware memory or a device. The interface is specified in
+instead of silently touching firmware memory or a device.
+
+On top of that mapping the kernel runs a **bitmap physical frame allocator** over
+`EfiConventionalMemory` (two bitmaps, so `free` can reject frames that never belonged to it) and a
+**1 MiB kernel heap** — a first-fit free list whose headers live inside the heap itself, wired in as
+the `#[global_allocator]`, so `Box`, `Vec` and friends work in the kernel. Both are justified at boot
+by a self-check that writes and reads back every byte of 64 blocks, re-allocates after freeing half
+of them, asserts double frees are rejected and asserts the heap coalesces back to a single free
+block. The interface is specified in
 [docs/architecture/memory_subsystem.md](docs/architecture/memory_subsystem.md).
 
 ### Tests
@@ -115,15 +123,20 @@ The smoke test asserts **exact QEMU exit codes** rather than "it printed somethi
 whose self-check passed, 35 for a loader image failure, 39 for a broken `BootInfo` contract, 43 for a
 memory-initialisation failure, and 41 for a kernel fault. It also checks the serial log for evidence
 (identity-mapping size, `BootInfo` still readable after the `CR3` switch, `#PF` naming vector 14 and
-`cr2=0x0` for the deliberately unmapped null page).
+`cr2=0x0` for the deliberately unmapped null page, the frame count and the heap's return to a single
+free block). 35 assertions, all of which must pass.
 
 ### Known limitations
 
-*   **Milestones 0–2a only.** The bootloader loads the kernel, calls `exit_boot_services` and jumps
-    to the entry point; the kernel validates `BootInfo`, installs its own IDT and page tables, prints
-    a summary on COM1 and exits. There is **no heap, no user mode, no IPC and no scheduler** yet —
-    the ordering is listed in `docs/architecture/kernel_interface.md` §9, and M2b adds the physical
-    frame allocator plus the kernel heap.
+*   **Milestones 0–2 only.** The bootloader loads the kernel, calls `exit_boot_services` and jumps to
+    the entry point; the kernel validates `BootInfo`, installs its own IDT and page tables, brings up
+    the frame allocator and heap, prints a summary on COM1 and exits. There is **no user mode, no IPC
+    and no scheduler** yet — the ordering is listed in `docs/architecture/kernel_interface.md` §9.
+*   The heap is **fixed at 1 MiB and does not grow**; exhausting it panics (exit code 41) rather than
+    extending the heap. Growing it needs a region list under the allocator and is a design of its own.
+*   Only `EfiConventionalMemory` is handed out. On the default 128 MiB QEMU machine that is about
+    78 MiB of the 127 MiB managed window; boot-services/runtime/ACPI memory is deliberately left
+    alone until reusing it is measured.
 *   Only `ET_EXEC` kernel images are accepted; a PIE (`ET_DYN`) kernel would require relocation
     handling that is not implemented.
 *   The kernel maps memory but does not use demand paging, W^X or per-process address spaces, and it

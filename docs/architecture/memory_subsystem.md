@@ -173,17 +173,23 @@ broken, exactly like an invalid `BootInfo`. 43 is reserved for memory initialisa
 ### 5.1 State
 
 ```rust
-pub struct FrameAllocator { /* static bitmap + managed range + counters */ }
+pub struct FrameAllocator<'a> { /* two bitmaps + managed range + reserved ranges + counters */ }
 ```
 
-* the bitmap is a `static` array in `.bss`, **one bit per frame, `1 = in use`**;
-* with `MAX_IDENTITY_BYTES = 4 GiB` it is `4 GiB / 4 KiB / 8 = 128 KiB`;
+* two `static` bitmaps in `.bss`, **one bit per frame each**: `allocatable` (`1 = this frame may be
+  handed out at all`) and `used` (`1 = currently handed out`);
+* they are separate because `free` must tell "a frame that never belonged to the allocator" (firmware
+  reserved memory, MMIO, non-conventional memory) apart from "a frame that is already free". With a
+  single bitmap both are `1`, and `free` would put memory it must never hand out back into the free
+  pool;
+* with `MAX_IDENTITY_BYTES = 4 GiB` they cost `2 × 4 GiB / 4 KiB / 8 = 256 KiB`;
 * bit *i* describes frame `managed_start + i * 4096`.
 
 ### 5.2 Which frames are free
 
-`init(bitmap, &map, reserved: &[Range<u64>], config)` starts with every frame marked **in use** and
-clears a bit only when all of the following hold:
+`init(bitmap, &map, reserved, config)` starts with `allocatable = 0` for every frame (nothing may be
+handed out) and `used = 1` (nothing is free), then marks a frame allocatable and free only when all of
+the following hold:
 
 1. the frame lies completely inside one `EfiConventionalMemory` region — **only** conventional
    memory is handed out in M2 [decision #15], even though `kernel_interface.md` §6.2 says
@@ -198,8 +204,12 @@ clears a bit only when all of the following hold:
 
 Rule 4 is redundant with rule 1 — all of those ranges are reported as `EfiLoaderData` — and is kept
 **on purpose**: the allocator must not depend on the firmware having classified our own allocations
-correctly. The self-check verifies that no free frame overlaps a reserved range, which is exactly
-the invariant a bug here would break (and exactly what `inject-memory-fault` removes, §7.2).
+correctly. The self-check cross-checks both the allocator's own reserved list **and** a list the
+kernel derives independently from `BootInfo`: neither may contain a free frame.
+
+Measured consequence of rule 1 (QEMU 8.2 + OVMF, default 128 MiB): the managed window is 127 MiB
+(32512 frames) but only ~78 MiB (20027 frames) is `EfiConventionalMemory`; the rest is
+`BootServices*`/`RuntimeServices*`/ACPI memory that M2 deliberately does not reuse yet.
 
 ### 5.3 API contract
 
@@ -208,9 +218,11 @@ pub fn init(bitmap: &mut [u8], map: &MemoryMap, reserved: &[Range<u64>], cfg: Co
     -> Result<Self, InitError>;                       // InitError::BitmapTooSmall
 pub fn alloc(&mut self) -> Option<PhysFrame>;         // lowest free frame
 pub fn alloc_contiguous(&mut self, count: usize) -> Option<PhysRange>;
-pub fn free(&mut self, frame: PhysFrame) -> Result<(), FreeError>; // AlreadyFree | NotManaged
+pub fn free(&mut self, frame: PhysFrame) -> Result<(), FreeError>;
+                                                      // AlreadyFree | NotManaged | Reserved
 pub fn stats(&self) -> FrameStats;                    // managed / free
-pub fn is_free(&self, frame: PhysFrame) -> bool;
+pub fn reserved_ranges(&self) -> &[ReservedRange];
+pub fn first_free_in(&self, start: u64, end: u64) -> Option<PhysFrame>;
 ```
 
 * **lowest-first** allocation: deterministic, which makes host tests and the QEMU self-check exact.
@@ -218,9 +230,12 @@ pub fn is_free(&self, frame: PhysFrame) -> bool;
 * `alloc_contiguous` exists because the heap is a single contiguous byte range (§6.1); it first-fits
   `count` consecutive free bits and reports "not enough contiguous memory" instead of returning a
   fragmented region;
-* `free` distinguishes `NotManaged` (outside the bitmap) from `AlreadyFree` (double free), so the
-  self-check can assert both. M2 has **no production caller** of `free` (the heap never shrinks); it
-  exists for the self-check and for M3, and is covered by host tests;
+* `free` distinguishes `NotManaged` (outside the managed window, or never allocatable),
+  `Reserved` (inside an explicitly reserved range) and `AlreadyFree` (double free), so the self-check
+  can assert all three. M2 has **no production caller** of `free` (the heap never shrinks); it exists
+  for the self-check and for M3, and is covered by host tests;
+* `reserved_ranges` and `first_free_in` exist for the self-check's cross-check; they are read-only
+  and cannot disturb the free set;
 * frame 0 is never managed (it is below `MIN_FREE_ADDR`), so `alloc` can never return it.
 
 ### 5.4 Concurrency
@@ -247,14 +262,21 @@ A hand-written **first-fit free list** whose headers live inside the free blocks
 `crates/kernel-memory/src/heap.rs`, operating on a caller-provided `&mut [u8]` arena so the whole
 algorithm is host-tested:
 
-* each free block carries a header (`size`, `next`) plus a minimum block size (32 bytes);
-* `alloc(layout)`: first fit; split a block when the remainder can hold a header and the minimum
-  payload;
-* `dealloc(ptr)`: return the block to the list **in address order and coalesce** with both
+* each block carries a 24-byte header: `magic` (u32), padding, `size` (total block size), `next`
+  (offset of the next free block); the magic tells a free block from an allocated one, which is what
+  makes double frees and bogus pointers detectable;
+* `MIN_BLOCK = MIN_PAYLOAD(16) + HEADER_SIZE(24) = 40` bytes — the smallest block the allocator will
+  *split off*; a request whose tail is smaller than that absorbs the tail, so an **allocated** block
+  can be as small as its header, and a **free** block smaller than `MIN_BLOCK` may exist until a
+  neighbour is freed and coalesces with it. Both cases are covered by host tests;
+* `alloc(size, align)`: first fit. The header always sits immediately before the payload — either the
+  padding before the payload is empty, or it is large enough to become a free block of its own
+  (small padding is rounded up to `MIN_BLOCK`). That is what lets `dealloc` recover the header from
+  the pointer alone;
+* `dealloc(offset)`: return the block to the list **in address order and coalesce** with both
   neighbours;
-* alignment: supports `layout.align()` up to `PAGE_SIZE` by over-allocating and keeping the padding
-  *before* the returned pointer, so that `dealloc` — which receives only the pointer, and may receive
-  a different `Layout` than `alloc` did — can always recover the header;
+* alignment: supports `layout.align()` up to `PAGE_SIZE`; the returned payload satisfies both the
+  requested alignment and the 8-byte header alignment;
 * `Layout.size == 0` is rejected per `GlobalAlloc`'s contract, as are unsupported alignments;
 * failure returns null; `alloc::alloc::handle_alloc_error` (default handler, stable since Rust 1.68)
   panics with "memory allocation of N bytes failed", and the M1 panic handler turns that into exit
@@ -274,24 +296,29 @@ gains the ability to leak. The self-check therefore asserts that the heap return
 block when it finishes (§6.4 step 5).
 
 ### 6.4 Self-check (the part that proves M2 works)
-Runs at the end of `kernel_main`, before the `self-check OK` line:
+Runs at the end of `kernel_main`, before the `self-check OK` line, and prints the failing step, the
+invariant and the address involved:
 
-1. allocate `N = 64` blocks of varying sizes (16, 33, 64, 129, 256, 1025, …) and write a pattern
-   derived from the block index into **every byte** of each block;
-2. assert that all blocks are pairwise disjoint and inside the heap region, and that equal-sized
-   blocks got distinct addresses — each of these is a real check, not a tautology;
+1. allocate `N = 64` blocks of varying sizes (16, 33, 64, 129, 256, 1025, 4096, 7 bytes) and write a
+   pattern derived from the block index into **every byte** of each block;
+2. assert that all blocks are pairwise disjoint and inside the heap region — each of these is a real
+   check, not a tautology;
 3. read every byte back and compare: this proves the frames are actually mapped and writable, not
    merely that the allocator's arithmetic works;
 4. free every other block, allocate `N/2` replacements of the same sizes, and verify that the
    replacements are disjoint from the still-live blocks (address-set disjointness, not an assumed
    address) and that the live blocks are untouched;
 5. free everything and assert the heap is back to exactly **one** free block whose size equals the
-   whole heap minus one header — i.e. coalescing worked;
-6. assert that `FrameAllocator::stats().free` dropped by exactly `HEAP_SIZE / 4096` since init, and
-   that no free frame overlaps a reserved range (§5.2 rule 4);
+   whole heap minus one header (1 MiB − 24 = 1048552 bytes) — i.e. coalescing worked — and that two
+   allocations of twice the heap size both fail cleanly (null, no wrap, no panic);
+6. frame-allocator checks: two fresh allocations must be **different frames** (the one check that
+   catches double allocation); freeing and re-allocating must return the same lowest frame; a double
+   free must be rejected; no free frame may fall inside a reserved range — checked both against the
+   allocator's own list and against a list the kernel derives independently from `BootInfo`; and
+   `FrameAllocator::stats().free` must have dropped by exactly `HEAP_SIZE / 4096 = 256` since init;
 7. print `heap: 0x…..0x… (1 MiB), 自检 OK`.
 
-Any failure prints the specific reason and exits **43**.
+Any failure prints the step, the invariant and the address, then exits **43**.
 
 ## 7. Exit codes and fault injection
 
@@ -308,9 +335,11 @@ they have different owners.
 ### 7.2 Fault injection (test only)
 Two features, both carrying the standing note "production builds never enable":
 
-* `inject-memory-fault` (new): builds the frame allocator's reserved list **without** the kernel
-  image range, so the rule-4 cross-check in §6.4 step 6 must fail → **43**. This exercises the
-  detection path protecting "the allocator must not hand out memory the kernel already owns";
+* `inject-memory-fault` (new): the frame allocator hands out a frame **without marking it used**
+  (crate feature `inject-double-alloc`, forwarded by the kernel feature of the same name), so §6.4
+  step 6's "two fresh allocations must be different frames" check must fail → **43**. This is the
+  failure mode worth injecting: two callers silently getting the same memory is the most dangerous
+  bug a frame allocator can have, and it is invisible until something corrupts;
 * `inject-null-deref` (new): after the page tables are installed, deliberately reads address `0`,
   unmapped by policy (§3.4) → `#PF` (vector 14) → the M1 exception handler → **41**. This is the
   only test that proves the *kernel's* tables are active rather than the firmware's.
@@ -327,10 +356,10 @@ acceptance case additionally proves that exception handling still works under ou
 | **M2a** | `crates/kernel-memory` with `map.rs` + `paging.rs` (host-tested, pure); the kernel builds and installs its own tables and re-validates `BootInfo` afterwards; exit code 43; `MAX_KERNEL_PAGES` raised in the bootloader | a page-table bug and a heap bug have very different diagnostics; the split keeps each PR's failure surface small |
 | **M2b** | `frame.rs` + `heap.rs` (host-tested); `#[global_allocator]`; the §6.4 self-check; the two injection features; new smoke-test cases | builds on a mapping M2a has already proved |
 
-`MAX_KERNEL_PAGES` must grow in M2a: the page-table arena (28 KiB) plus (in M2b) the 128 KiB frame
-bitmap make the image far larger than the current 64-page (256 KiB) budget. Forgetting this surfaces
-as the loader's `TooManyPages` error (exit 35) — which is exactly what the M2a acceptance criterion
-about the image span guards against.
+`MAX_KERNEL_PAGES` had to grow twice: 64 → 128 pages in M2a (page-table arena, 28 KiB) and
+128 → 256 pages (1 MiB) in M2b (the two frame bitmaps, 256 KiB, plus `alloc` and formatting code put
+the image at 104 pages). Forgetting this surfaces as the loader's `TooManyPages` error (exit 35) —
+which is exactly what the acceptance criterion about the image span guards against.
 
 ### 8.2 Deliverables
 
@@ -345,29 +374,37 @@ about the image span guards against.
 | 7 | `tests/smoke.sh` | new M2 cases (§8.3 / §8.4) |
 | 8 | Docs | this document, `kernel_interface.md` §7.2 and §9, `README` / `VISION` capability tables — all bilingual |
 
-### 8.3 Acceptance criteria — M2a
-- [ ] the kernel logs `paging: 恒等映射 …` with a mapped size ≥ 64 MiB and a 2 MiB block granularity;
-- [ ] the kernel re-validates `BootInfo` after installing the tables (log line), i.e. the identity
+### 8.3 Acceptance criteria — M2a (**met**, PR #16)
+- [x] the kernel logs `paging: 恒等映射 …` with a mapped size ≥ 64 MiB and a 2 MiB block granularity;
+- [x] the kernel re-validates `BootInfo` after installing the tables (log line), i.e. the identity
       map demonstrably covers the handoff structures;
-- [ ] `tests/smoke.sh` still asserts 37 for the normal case and 35 / 35 / 39 / 41 for the M1
+- [x] `tests/smoke.sh` still asserts 37 for the normal case and 35 / 35 / 39 / 41 for the M1
       negative cases;
-- [ ] `inject-null-deref` exits **41** and the log names vector 14 (`#PF`) — direct proof that the
+- [x] `inject-null-deref` exits **41** and the log names vector 14 (`#PF`) — direct proof that the
       kernel's tables, not the firmware's, are active;
-- [ ] `python3 tests/check_kernel_elf.py` passes and additionally asserts that the page-aligned load
+- [x] `python3 tests/check_kernel_elf.py` passes and additionally asserts that the page-aligned load
       span fits within `MAX_KERNEL_PAGES`;
-- [ ] `cargo test -p kernel-memory` passes (map + paging tests).
+- [x] `cargo test -p kernel-memory` passes (map + paging tests).
 
-### 8.4 Acceptance criteria — M2b
-- [ ] the log contains a frame count with `free > 0` and a heap line for a 1 MiB region;
-- [ ] all seven self-check steps pass on real QEMU + OVMF, including the byte-for-byte read-back of
+### 8.4 Acceptance criteria — M2b (**met**, PR #17)
+- [x] the log contains a frame count with `free > 0` and a heap line for a 1 MiB region;
+- [x] all seven self-check steps pass on real QEMU + OVMF, including the byte-for-byte read-back of
       64 blocks, the double-free detection and the coalescing assertion;
-- [ ] `inject-memory-fault` exits **43**, while the normal case still exits **37**;
-- [ ] `inject-fault` (M1) still exits **41**, now under the kernel's own page tables;
-- [ ] the free-frame count dropped by exactly `HEAP_SIZE / 4096` after init;
-- [ ] `cargo test -p kernel-memory` covers allocate / free / reuse / coalesce / alignment /
+- [x] `inject-memory-fault` exits **43**, while the normal case still exits **37**;
+- [x] `inject-fault` (M1) still exits **41**, now under the kernel's own page tables;
+- [x] the free-frame count dropped by exactly `HEAP_SIZE / 4096` after init;
+- [x] `cargo test -p kernel-memory` covers allocate / free / reuse / coalesce / alignment /
       exhaustion / double-free;
-- [ ] no existing smoke assertion regresses, and fmt/clippy stay clean in every configuration already
+- [x] no existing smoke assertion regresses, and fmt/clippy stay clean in every configuration already
       used by CI.
+
+Measured on QEMU 8.2.2 + OVMF (default 128 MiB) with 35/35 smoke assertions green:
+
+```
+frames: 管理 32512 帧（127 MiB），堆取走后空闲 20027 帧
+heap: 0x168000..0x268000（1024 KiB，占用 256 个连续页帧）
+heap: 自检 OK（全部释放后空闲 1048552 字节 / 1 个块）
+```
 
 ### 8.5 Known pitfalls, most likely first
 
@@ -397,6 +434,8 @@ about the image span guards against.
 | 19 | New exit code 43 for memory-init failure | distinct from 39 | a broken memory subsystem and a broken handoff have different owners and different fixes | medium (released meanings are frozen) |
 | 20 | No locking in M2 | documented as a precondition | single core, interrupts disabled; an untested lock would be worse than a written precondition | high |
 | 21 | The null page is never mapped | policy, regardless of the firmware's type | turns null dereferences into `#PF` (→ 41) and gives M2a a test that proves our tables are live | high |
+| 22 | Two frame bitmaps (`allocatable` + `used`) instead of one | 256 KiB instead of 128 KiB | with one bitmap, `free` cannot tell "never allocatable" (MMIO, reserved) from "already free", so it would put memory it must never hand out into the free pool | medium |
+| 23 | The injection for 43 is "hand out the same frame twice" | crate feature `inject-double-alloc` | double allocation is the most dangerous frame-allocator bug and the one the self-check exists to catch; corrupting the reserved list would not have been observable | high |
 
 ## 10. Interface change process
 1. `crates/kernel-memory`'s public items are an interface between the kernel and its own logic;
