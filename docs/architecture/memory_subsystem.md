@@ -239,10 +239,14 @@ pub fn first_free_in(&self, start: u64, end: u64) -> Option<PhysFrame>;
 * frame 0 is never managed (it is below `MIN_FREE_ADDR`), so `alloc` can never return it.
 
 ### 5.4 Concurrency
-None. After handoff, interrupts are disabled and there is one core. `FrameAllocator` is therefore a
-plain `static` behind an `UnsafeCell` with `Sync` — the same pattern M1 uses for the IDT — and the
-documented rule is: **wrap it in a lock before enabling interrupts or a second core** (M3/M4).
-Adding an untested lock now would be worse than documenting the precondition [decision #20].
+None inside M2: after handoff interrupts are disabled and there is one core, so `FrameAllocator` is a
+plain `static` behind an `UnsafeCell` with `Sync` — the same pattern M1 uses for the IDT — plus the
+documented precondition "wrap it in a lock before enabling interrupts" [decision #20].
+
+> ✅ **M3 has now carried that precondition out**: `FrameAllocator` sits behind an interrupt-safe
+> `SpinLock` and every call goes through it (see
+> [threads_and_scheduling.md](threads_and_scheduling.md) §5). Decision #20 is therefore satisfied,
+> not repealed.
 
 ## 6. Kernel heap
 
