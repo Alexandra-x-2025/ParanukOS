@@ -98,7 +98,8 @@ pub fn enter_kernel(stdout: &mut Output, kernel: &LoadedKernel, prepared: Prepar
     let memory_map = unsafe { boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
 
     // 退出之后仍然可以安全地做纯内存读写，因此现在写入 BootInfo。
-    let info = BootInfo {
+    #[allow(unused_mut)]
+    let mut info = BootInfo {
         mmap_ptr: memory_map.buffer().as_ptr() as u64,
         mmap_len: memory_map.len() as u64,
         mmap_desc_size: memory_map.meta().desc_size as u32,
@@ -111,6 +112,13 @@ pub fn enter_kernel(stdout: &mut Output, kernel: &LoadedKernel, prepared: Prepar
         exit_port: u32::from(exit_port()),
         ..BootInfo::new()
     };
+    // 故障注入（仅测试）：用来验证内核确实会拒绝错误的 magic 并以 39 退出
+    #[cfg(feature = "inject-bad-magic")]
+    {
+        info.magic = BOOT_INFO_MAGIC ^ 0xFFFF_FFFF;
+    }
+
+    #[cfg(not(feature = "inject-bad-magic"))]
     debug_assert_eq!(info.magic, BOOT_INFO_MAGIC);
     debug_assert_eq!(info.version, BOOT_INFO_VERSION);
 
