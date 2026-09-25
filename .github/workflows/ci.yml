@@ -34,12 +34,18 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy 静态检查
-        run: cargo clippy --all-targets -- -D warnings
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo clippy -p kernel-image --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
 
       - name: 构建（debug / release）
         run: |
           cargo build
           cargo build --release
+
+      - name: 单元测试（宿主平台）
+        # 可单测的纯逻辑在 crates/kernel-image；UEFI 二进制自身必须 test = false
+        run: cargo test -p kernel-image --target x86_64-unknown-linux-gnu
 
       - name: 校验产物为 PE32+ EFI 应用
         # 用结构解析而不是 `file` 的输出措辞做断言：后者的措辞会随 binutils 版本变化

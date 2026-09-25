@@ -2,9 +2,10 @@
 #
 # ParanukOS QEMU 冒烟测试。
 #
-# 断言两件事：
+# 断言三件事：
 #   正向：ESP 中放入合法 ELF64 内核镜像时，引导器能启动、读盘、校验 ELF 并报告成功；
-#   反向：缺少内核镜像时，引导器能优雅报错，而不是挂死、崩溃或误报成功。
+#   反向 1：缺少内核镜像时，引导器能优雅报错，而不是挂死、崩溃或误报成功；
+#   反向 2：内核镜像存在但不是合法 ELF 时，同样必须被拒绝并给出具体原因。
 #
 # 用法: bash tests/smoke.sh
 # 环境变量:
@@ -54,7 +55,7 @@ if ! command -v rustc >/dev/null 2>&1 || ! command -v cargo >/dev/null 2>&1; the
     exit 1
 fi
 
-echo "==> 1/4 构建 EFI 镜像"
+echo "==> 1/5 构建 EFI 镜像"
 if ! cargo build --target "$TARGET"; then
     echo "[-] 构建失败。" >&2
     exit 1
@@ -65,7 +66,7 @@ if [ ! -f "$EFI" ]; then
 fi
 echo "    产物: $EFI"
 
-echo "==> 2/4 编译测试用内核镜像（ET_EXEC）"
+echo "==> 2/5 编译测试用内核镜像（ET_EXEC）"
 # 注意：x86_64-unknown-none 默认产出 PIE（ET_DYN），而引导器要求 ET_EXEC，
 # 因此必须加 -C relocation-model=static。
 if ! rustc \
@@ -119,7 +120,7 @@ show_log() {
     tail -30 "$1" | sed 's/^/    /'
 }
 
-echo "==> 3/4 正向用例：ESP 中存在内核镜像"
+echo "==> 3/5 正向用例：ESP 中存在内核镜像"
 if boot_until "$WORK/esp-extra" "$LOG_DIR/positive.log" '内核镜像校验通过'; then
     ok "QEMU 启动并完成内核镜像校验"
 else
@@ -137,7 +138,7 @@ else
     bad "缺少内核载入日志"
 fi
 
-echo "==> 4/4 反向用例：ESP 中缺少内核镜像"
+echo "==> 4/5 反向用例：ESP 中缺少内核镜像"
 if boot_until "-" "$LOG_DIR/negative.log" '内核加载失败'; then
     ok "缺少内核镜像时优雅报错"
 else
@@ -146,6 +147,27 @@ else
 fi
 if grep -q '内核镜像校验通过' "$LOG_DIR/negative.log"; then
     bad "缺少内核镜像却报告成功"
+else
+    ok "未误报成功"
+fi
+
+echo "==> 5/5 反向用例：内核镜像存在但不是合法 ELF"
+mkdir -p "$WORK/esp-bad/EFI/PARANUKO"
+# 必须是 >= 64 字节的非 ELF 数据：否则会先命中「镜像过小」而不是 magic 校验
+head -c 128 /dev/zero >"$WORK/esp-bad/EFI/PARANUKO/KERNEL.ELF"
+if boot_until "$WORK/esp-bad" "$LOG_DIR/bad-image.log" '内核加载失败'; then
+    ok "非法 ELF 镜像被拒绝"
+else
+    bad "未观察到预期的错误日志"
+    show_log "$LOG_DIR/bad-image.log"
+fi
+if grep -q '缺少 ELF magic' "$LOG_DIR/bad-image.log"; then
+    ok "报错指明了具体原因（缺少 ELF magic）"
+else
+    bad "报错未指明具体原因"
+fi
+if grep -q '内核镜像校验通过' "$LOG_DIR/bad-image.log"; then
+    bad "非法镜像却报告成功"
 else
     ok "未误报成功"
 fi
