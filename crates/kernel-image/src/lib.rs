@@ -267,10 +267,7 @@ pub fn segments(data: &[u8]) -> Result<SegmentIter<'_>, SegmentError> {
         return Err(SegmentError::BadProgramHeaders);
     }
     let table_offset = read_u64(data, E_PHOFF_OFFSET);
-    let entry_size = u16::from_le_bytes([
-        data[E_PHENTSIZE_OFFSET],
-        data[E_PHENTSIZE_OFFSET + 1],
-    ]);
+    let entry_size = u16::from_le_bytes([data[E_PHENTSIZE_OFFSET], data[E_PHENTSIZE_OFFSET + 1]]);
     let count = u16::from_le_bytes([data[E_PHNUM_OFFSET], data[E_PHNUM_OFFSET + 1]]);
 
     if count == 0 || usize::from(entry_size) < PHDR_LEN {
@@ -506,8 +503,26 @@ mod tests {
     fn two_segment_image() -> Vec<u8> {
         let mut data = header_with_phdrs(2);
         // 先占位，稍后填充分段数据
-        push_phdr(&mut data, PT_LOAD, PF_R | PF_X, 0x2000, 0x101000, 0x101000, 16, 16);
-        push_phdr(&mut data, PT_LOAD, PF_R | PF_W, 0x3000, 0x104B38, 0x104B38, 8, 56);
+        push_phdr(
+            &mut data,
+            PT_LOAD,
+            PF_R | PF_X,
+            0x2000,
+            0x101000,
+            0x101000,
+            16,
+            16,
+        );
+        push_phdr(
+            &mut data,
+            PT_LOAD,
+            PF_R | PF_W,
+            0x3000,
+            0x104B38,
+            0x104B38,
+            8,
+            56,
+        );
         data.resize(0x3000 + 8, 0);
         data
     }
@@ -563,7 +578,10 @@ mod tests {
         let mut data = header_with_phdrs(1);
         push_phdr(&mut data, PT_LOAD, PF_R, 0, 0x1000, 0x1000, 100, 10);
         data.resize(0x1000, 0);
-        assert_eq!(check_segments(&data), Err(SegmentError::FileszLargerThanMemsz));
+        assert_eq!(
+            check_segments(&data),
+            Err(SegmentError::FileszLargerThanMemsz)
+        );
 
         // 数据超出文件
         let mut data = header_with_phdrs(1);
@@ -587,17 +605,26 @@ mod tests {
         push_phdr(&mut data, PT_LOAD, PF_R, 0, 0x1000, 0x1000, 8, 64);
         push_phdr(&mut data, PT_LOAD, PF_R, 0, 0x1020, 0x1020, 8, 64);
         data.resize(0x1000, 0);
-        assert_eq!(check_no_overlap(&data), Err(SegmentError::OverlappingSegments));
+        assert_eq!(
+            check_no_overlap(&data),
+            Err(SegmentError::OverlappingSegments)
+        );
     }
 
     #[test]
     fn entry_must_be_inside_an_executable_segment() {
         let data = two_segment_image();
         // two_segment_image 的头部入口是 ENTRY（0x201190），不在段内
-        assert_eq!(check_entry(&data, ENTRY), Err(SegmentError::EntryNotExecutable));
+        assert_eq!(
+            check_entry(&data, ENTRY),
+            Err(SegmentError::EntryNotExecutable)
+        );
         assert_eq!(check_entry(&data, 0x101008), Ok(()));
         // 落在可写但不可执行的段里 → 拒绝
-        assert_eq!(check_entry(&data, 0x104B38), Err(SegmentError::EntryNotExecutable));
+        assert_eq!(
+            check_entry(&data, 0x104B38),
+            Err(SegmentError::EntryNotExecutable)
+        );
     }
 
     #[test]

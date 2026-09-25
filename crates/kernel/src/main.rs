@@ -12,9 +12,7 @@
 
 mod serial;
 
-use boot_info::{
-    BootInfo, EXIT_VALUE_KERNEL_FAILURE, EXIT_VALUE_KERNEL_OK, qemu_exit_code,
-};
+use boot_info::{BootInfo, EXIT_VALUE_KERNEL_FAILURE, EXIT_VALUE_KERNEL_OK, qemu_exit_code};
 use core::sync::atomic::{AtomicU32, Ordering};
 use serial::Serial;
 

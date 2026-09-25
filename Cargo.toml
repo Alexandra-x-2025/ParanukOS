@@ -32,8 +32,11 @@ uefi = { version = "0.39", default-features = false, features = [
 # 日志门面（Facade），由 uefi 的 logger 特性驱动
 log = "0.4"
 
-# 内核镜像（ELF64/x86-64）头部校验。零依赖，可针对宿主平台做单元测试。
+# 内核镜像（ELF64/x86-64）头部校验与段解析。零依赖，可针对宿主平台做单元测试。
 kernel-image = { path = "crates/kernel-image" }
+
+# 与内核共享的 BootInfo 与协议常量（避免两侧 repr(C) 漂移）
+boot-info = { path = "crates/boot-info" }
 
 [profile.dev]
 panic = "abort"

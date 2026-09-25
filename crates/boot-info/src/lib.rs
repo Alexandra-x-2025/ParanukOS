@@ -82,7 +82,10 @@ impl fmt::Display for BootInfoError {
                 write!(f, "BootInfo 版本不受支持（得到 {found}，支持 {supported}）")
             }
             Self::TooSmall { size, expected } => {
-                write!(f, "BootInfo 过小（得到 {size} 字节，至少需要 {expected} 字节）")
+                write!(
+                    f,
+                    "BootInfo 过小（得到 {size} 字节，至少需要 {expected} 字节）"
+                )
             }
         }
     }
@@ -208,10 +211,7 @@ mod tests {
     fn zeroed_magic_is_rejected() {
         // 内核可能被错误地跳转进来，此时 BootInfo 内容是垃圾（含全零），必须被拒绝
         let info = BootInfo::default();
-        assert_eq!(
-            info.validate(),
-            Err(BootInfoError::WrongMagic { found: 0 })
-        );
+        assert_eq!(info.validate(), Err(BootInfoError::WrongMagic { found: 0 }));
     }
 
     #[test]
@@ -247,7 +247,10 @@ mod tests {
             size: (size_of::<BootInfo>() - 1) as u32,
             ..BootInfo::new()
         };
-        assert!(matches!(info.validate(), Err(BootInfoError::TooSmall { .. })));
+        assert!(matches!(
+            info.validate(),
+            Err(BootInfoError::TooSmall { .. })
+        ));
     }
 
     #[test]
