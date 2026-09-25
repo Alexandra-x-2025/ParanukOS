@@ -30,6 +30,7 @@ version = "0.1.0"
 dependencies = [
  "boot-info",
  "kernel-memory",
+ "kernel-sched",
 ]
 
 [[package]]
@@ -38,6 +39,10 @@ version = "0.1.0"
 
 [[package]]
 name = "kernel-memory"
+version = "0.1.0"
+
+[[package]]
+name = "kernel-sched"
 version = "0.1.0"
 
 [[package]]

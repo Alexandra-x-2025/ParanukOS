@@ -1,0 +1,12 @@
+[package]
+name = "kernel-sched"
+version = "0.1.0"
+edition = "2024"
+description = "ParanukOS 调度器纯逻辑：线程表、就绪队列、轮转、tick 记账与回收"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# 有意保持零依赖：既要能被 no_std 的内核链接，又要在宿主平台上直接跑单元测试
+# （内核二进制必须 test = false，原因见根 Cargo.toml 的 [[bin]] 注释）。
+# 审计依据：AGENTS.md 第 2 条禁止任何隐式引入 std 的依赖，零依赖是最强的保证。
