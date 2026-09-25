@@ -75,8 +75,19 @@ agreed path (`\EFI\PARANUKO\KERNEL.ELF`) and boots it with OVMF. After the kerne
 `BootInfo` summary, QEMU either exits with a status code (when the `qemu-exit` feature is enabled)
 or the CPU halts.
 
-To leave the emulator interactively, press **`Ctrl + A` and then `X`**. Do not use `Ctrl + C`: it
-leaves a zombie QEMU process holding the serial port.
+To leave the emulator, press **`Ctrl + A` and then `X`**.
+
+If `Ctrl + A` does nothing at all, that QEMU's standard input is not your terminal — for example it
+was started with the output redirected to a file, or launched as a background job. In that case run
+one of these from another terminal, and open an issue if the runner did it to you:
+
+```bash
+pkill -f 'qemu-system-x86_64.*paranukos'   # or: kill $(pgrep -f qemu-system-x86_64)
+```
+
+`run-qemu.sh` runs QEMU in the **foreground** (`exec`), precisely so that the keyboard/mux input
+stays connected to your terminal and so that killing the process cannot leave an orphan. Avoid
+`Ctrl + C` by convention: use `Ctrl + A` `X`.
 
 To leave the emulator, press **`Ctrl + A` and then `X`**. Do not use `Ctrl + C`: it leaves a zombie QEMU process holding the serial port.
 

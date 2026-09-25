@@ -73,7 +73,17 @@ cargo run      # 构建引导器、把内核放进 ESP、用 OVMF 启动
 （`\EFI\PARANUKO\KERNEL.ELF`），然后用 OVMF 引导。内核打印完 `BootInfo` 摘要后，
 QEMU 要么以状态码退出（启用 `qemu-exit` 特性时），要么 CPU 停机。
 
-退出模拟器：**先按 `Ctrl + A`，再按 `X`**。请勿使用 `Ctrl + C`，否则会留下僵尸 QEMU 进程并霸占串口。
+退出模拟器：**先按 `Ctrl + A`，再按 `X`**。
+
+如果 `Ctrl + A` 毫无反应，说明这个 QEMU 的标准输入不是你的终端（例如启动时把输出重定向到了文件，
+或被当作后台任务启动）。此时在**另一个终端**执行下面任一命令收尾：
+
+```bash
+pkill -f 'qemu-system-x86_64.*paranukos'   # 或: kill $(pgrep -f qemu-system-x86_64)
+```
+
+`run-qemu.sh` 以**前台 `exec`** 方式运行 QEMU，正是为了让键盘（mux）输入始终连在终端上，
+并且杀进程时不会留下孤儿进程。按项目规范仍请用 `Ctrl + A` `X` 而不是 `Ctrl + C`。
 
 ### 内核镜像
 

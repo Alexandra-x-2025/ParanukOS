@@ -21,6 +21,10 @@
 # 若 QEMU 是从非标准前缀运行的，还需自行设置 QEMU_MODULE_DIR。
 #
 # 退出模拟器：先按 Ctrl + A，再按 X（退出码 0）。
+# 若 Ctrl + A 毫无反应，说明这个 QEMU 的标准输入不是终端（例如启动时做过输出重定向）；
+# 这种情况下在**另一个终端**执行下面任一命令即可收尾：
+#   pkill -f 'qemu-system-x86_64.*paranukos'
+#   kill <上面 `pgrep -a qemu-system-x86` 给出的 PID>
 # 退出码含义见文件末尾。
 # 切勿使用 Ctrl + C —— 会造成僵尸 QEMU 进程在后台死锁并霸占串口。
 #
@@ -108,8 +112,9 @@ fi
 
 # 可写的变量存储：pflash 需要一份可写 VARS，且每次运行都从模板重新拷贝，
 # 避免上一次运行留下的 NVRAM 状态影响下一次（对可重复的冒烟测试很重要）。
-WORK_DIR="$(mktemp -d)"
-VARS_COPY="${WORK_DIR}/OVMF_VARS.fd"
+# 变量存储用固定路径：脚本会 exec 成 QEMU，之后没有清理时机；固定路径每次覆盖，
+# 不会像 mktemp 那样在 /tmp 里不断堆积。
+VARS_COPY="${TMPDIR:-/tmp}/paranukos_ovmf_vars.fd"
 VARS_SOURCE="${OVMF_VARS:-}"
 if [ -z "${VARS_SOURCE}" ]; then
     derived="${OVMF_CODE/_CODE/_VARS}"
@@ -133,11 +138,22 @@ if [ -n "${QEMU_DATA_DIR:-}" ]; then
     qemu_args+=(-L "${QEMU_DATA_DIR}")
 fi
 
-# QEMU 作为子进程运行：脚本被 timeout/kill（含 CI 用例）终止时能一并清理，
-# 避免留下僵尸 QEMU 进程占用串口。
-# isa-debug-exit 的端口必须与 src/main.rs / uefi 的 qemu 特性一致（都是 0xF4）：
-# QEMU 8.2 起该设备默认的 iobase 是 0x501，不显式指定的话应用写入 0xF4 不会生效。
-qemu-system-x86_64 \
+# QEMU 以前台方式 **exec**：脚本进程被 QEMU 取代。这三点都很关键：
+#   1) 标准输入保持为终端 —— 用 `&` 后台启动时，非交互式 shell 会把后台任务的 stdin
+#      接到 /dev/null，QEMU 的 mux 按键（`Ctrl+A` 系列）就完全失效（实测 fd0 -> /dev/null）；
+#   2) 不会留下僵尸进程 —— 杀掉这个进程就是在杀 QEMU 本身，不存在"脚本死了 QEMU 还在"；
+#   3) 退出码天然就是 QEMU 的退出码，不需要再 wait 转发。
+#
+# 退出码（配合 -device isa-debug-exit，QEMU 退出码 = (value << 1) | 1）：
+#   0    人类退出（Ctrl + A 然后 X），或固件正常结束
+#   33   引导器装载完成（M0 起成功路径不再使用）
+#   35   引导器报告内核镜像装载失败
+#   37   内核自检通过
+#   39   内核自检失败
+#   41   内核未处理异常或 panic
+#   124  被 timeout 终止 —— 应用没有主动退出，通常意味着卡死
+# 原样上报 QEMU 的退出码：不把 124/137 归一化成成功，否则会掩盖真实故障。
+exec qemu-system-x86_64 \
     "${qemu_args[@]}" \
     -machine q35 \
     -vga none \
@@ -146,28 +162,4 @@ qemu-system-x86_64 \
     -drive if=pflash,format=raw,file="${VARS_COPY}" \
     -net none \
     -nographic \
-    -drive format=raw,file=fat:rw:"${ESP_DIR}" &
-qemu_pid=$!
-
-cleanup() {
-    if kill -0 "${qemu_pid}" 2>/dev/null; then
-        kill "${qemu_pid}" 2>/dev/null || true
-        wait "${qemu_pid}" 2>/dev/null || true
-    fi
-    rm -rf "${WORK_DIR}"
-}
-trap cleanup EXIT INT TERM
-
-set +e
-wait "${qemu_pid}"
-status=$?
-set -e
-
-# 原样上报 QEMU 的退出码。配合 `-device isa-debug-exit`，退出码有明确含义：
-#   0    人类退出（Ctrl + A 然后 X），或固件正常结束
-#   33   引导器报告成功（读取 + ELF 校验 + 载入内存全部完成）
-#   35   引导器报告内核加载失败
-#   9    panic（uefi 的 qemu 特性以 0x04 作为失败码，(4 << 1) | 1 = 9）
-#   124  被 timeout 终止 —— 应用没有主动退出，通常意味着卡死
-# 注意：不再把 124/137 归一化成成功，否则会掩盖真实故障。
-exit "${status}"
+    -drive format=raw,file=fat:rw:"${ESP_DIR}"
