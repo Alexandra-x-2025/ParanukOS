@@ -276,6 +276,7 @@ QEMU's `isa-debug-exit` exit code is `(value << 1) | 1`.
 | **39** | **Kernel self-check failed** — the kernel concluded it cannot run (magic/version mismatch, missing memory map, no RSDP) | **kernel** | implemented (M0) |
 | **41** | **Kernel fault or panic** — an unhandled CPU exception (`#UD`, `#GP`, `#PF`, …) or a `panic!` | **kernel** | implemented (M1) |
 | **43** | **Kernel memory initialisation failed** — page tables, frame allocator or heap; see [memory_subsystem.md](memory_subsystem.md) §7.1 | **kernel** | implemented (M2) |
+| **45** | **Kernel scheduler self-check failed** — descriptor tables, interrupts, locking or threads; see [threads_and_scheduling.md](threads_and_scheduling.md) §9.1 | **kernel** | implemented (M3a) |
 | 124 | Timed out without exiting (treated as a hang) | — | implemented (fails) |
 
 **33 and 37 must stay distinct**: otherwise the test cannot tell "the bootloader loaded and stopped"
@@ -341,7 +342,7 @@ interrupt handling.
 |---|---|---|
 | M1 | Minimal IDT + panic handler + kernel serial logging — **done** | M0 |
 | M2 | [memory_subsystem.md](memory_subsystem.md) — kernel page tables + physical frame allocator (treating `LOADER_DATA` as in use) + kernel heap — **done** (M2a in PR #16, M2b in PR #17) | M1 |
-| M3 | **Interface defined:** [threads_and_scheduling.md](threads_and_scheduling.md) — GDT/TSS/IST, 8259 PIC + PIT, interrupt-safe locking, kernel threads sharing one address space, preemptive round-robin scheduler | M2 |
+| M3 | [threads_and_scheduling.md](threads_and_scheduling.md) — GDT/TSS/IST, 8259 PIC + PIT, interrupt-safe locking, kernel threads sharing one address space, preemptive round-robin scheduler — **M3a done** (PR #19); M3b (context switch + threads) not started | M2 |
 | M4 | First user-space service (minimal privilege switch; no IPC semantics yet) | M3 |
 | M5 | IPC message format + capability token semantics (**only now**, and constrained by real user-space processes) | M4 |
 
