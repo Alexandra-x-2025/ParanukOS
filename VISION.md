@@ -11,7 +11,7 @@ This project is inspired by, and references the architecture of, [os.phil-opp.co
 ParanukOS is built on the principle of **Strict Isolation**. We believe system stability comes from granting components the minimum possible authority:
 *   **Microkernel architecture:** the kernel only handles the most fundamental tasks, such as IPC, memory management and basic scheduling.
 *   **High reliability:** by moving all drivers and file systems into user mode, a crash in a single service cannot take the whole system down.
-*   **Modern hardware focus:** optimized specifically for the last 10 generations of hardware.
+*   **Modern hardware focus (explicitly bounded):** x86-64 + UEFI + ACPI 6.x only — no BIOS/CSM, no 32-bit x86, no legacy device support. Stated as a technical constraint so it can actually decide trade-offs.
 *   **Wasm-first application layer:** a secure sandbox that lets users run software through WebAssembly.
 
 ## 🚀 Key Features
@@ -23,12 +23,14 @@ A microkernel implemented in pure Rust, providing:
 *   **SMP support:** native multi-core scheduling and synchronization.
 
 ### 💾 File System Roadmap
-*   **Short term:** a minimal read-only Ext4/FAT32 compatibility layer for initial development and QEMU testing.
-*   **Long term:** a pure-Rust, user-space **copy-on-write (CoW)** file system based on the TFS design, giving physical-level isolation of data writes.
+*   **Now:** FAT32 only. The ESP is already FAT32, so the bootloader (and an early kernel) can read the volume it was loaded from without writing a new file system driver.
+*   **Later (requires its own interface document):** a pure-Rust, user-space **copy-on-write (CoW)** file system based on the TFS design, giving physical-level isolation of data writes.
+*   **Explicitly not short-term: read-only Ext4.** Extents, the journal, indirect blocks and checksums make it a multi-month effort that buys almost nothing during bring-up, and no milestone in `docs/architecture/kernel_interface.md` depends on it.
 
 ### 🖥️ Hardware & Booting
 *   **UEFI bootloader (no GRUB):** a UEFI application built on [uefi-rs](https://github.com/rust-osdev/uefi-rs) 0.39 and compiled for `x86_64-unknown-uefi`. It locates the ESP it was started from, validates the kernel image as an ELF64/x86-64 executable and loads it into memory. GRUB is not used anywhere in the boot path.
 *   **Rust-native development:** built from the ground up in Rust, eliminating memory-safety vulnerabilities.
+*   **Interface specification:** the bootloader↔kernel contract — image format and load rules, entry ABI, `BootInfo`, handoff semantics and exit codes — is defined in [docs/architecture/kernel_interface.md](docs/architecture/kernel_interface.md).
 
 ### 🌐 Application Environment
 *   **Web/Wasm runtime:** the primary environment for user applications, offering a sandboxed "software store" experience with near-native performance.

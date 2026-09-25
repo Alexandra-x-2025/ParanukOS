@@ -2,6 +2,16 @@
 
 [English] | [中文](core_kernel_CN.md)
 
+> **Status: this document is a *direction*, not a design you can start work from.**
+>
+> The interfaces that are actually settled — kernel image format and load rules, entry ABI,
+> `BootInfo`, handoff semantics and exit codes — live in
+> [kernel_interface.md](kernel_interface.md).
+> Everything else here (IPC, capability model, scheduling, user-space services, Wasm/WASI
+> isolation) is **not designed yet**: it states direction and constraints only. Each item needs
+> its own interface document before implementation. The ordering dependencies are listed in
+> [kernel_interface.md](kernel_interface.md) §9.
+
 ## 1. Design Goals
 *   **Minimal kernel mode:** the kernel only handles the most fundamental hardware abstraction, task scheduling and inter-process communication (IPC).
 *   **High reliability:** by moving every driver and system service into user mode, a crash in a single service cannot take the whole system down.
@@ -35,6 +45,12 @@ Every non-core function runs as an independent process:
 *   **Wasm sandbox:** user applications run entirely inside a Wasm environment and request system services through WASI.
 
 ## 5. Next Steps
+
+> None of the three items below has an interface definition yet, and none belongs to a settled
+> milestone. In the current ordering they sit at M5 (IPC and the capability model), *after* a
+> real user-space process exists to constrain the design — see
+> [kernel_interface.md](kernel_interface.md) §9.
+
 1.  [ ] Define the IPC message format and protocol specification.
 2.  [ ] Design the capability-based permission model.
 3.  [ ] Implement the basic memory page management logic.
