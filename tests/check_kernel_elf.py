@@ -4,6 +4,10 @@
 对应 docs/architecture/kernel_interface.md 的验收标准 §8.4 第 1 条：
 `e_type=ET_EXEC`、`e_machine=x86-64`、`e_entry` 落在某个可执行 `PT_LOAD` 段内。
 
+以及 docs/architecture/memory_subsystem.md §8.3：页对齐后的装载区间必须落在引导器的
+`MAX_KERNEL_PAGES` 预算内——M2 起内核带了静态页表竞技场（M2b 还会加页帧位图），
+忘了提高预算的表现就是引导器以 35 退出。
+
 为什么不依赖工具链：`readelf`/`file` 的输出措辞随 binutils 版本变化，不适合作为
 CI 断言；这里直接解析结构。
 
@@ -20,6 +24,10 @@ ELFCLASS64 = 2
 ELFDATA2LSB = 1
 PT_LOAD = 1
 PF_X = 1
+PAGE = 4096
+
+# 必须与 src/bootloader/fs_loader.rs 的 MAX_KERNEL_PAGES 保持一致。
+MAX_KERNEL_PAGES = 128
 
 
 class CheckError(Exception):
@@ -53,12 +61,16 @@ def check(path):
 
     load_segments = 0
     entry_ok = False
+    span_start = None
+    span_end = 0
     for index in range(e_phnum):
         offset = e_phoff + index * e_phentsize
         if offset + 56 > len(data):
             raise CheckError("Program Header 表越界")
         p_type, p_flags = struct.unpack_from("<II", data, offset)
-        p_offset, p_vaddr, _p_paddr, p_filesz, p_memsz = struct.unpack_from("<QQQQQ", data, offset + 8)
+        p_offset, p_vaddr, p_paddr, p_filesz, p_memsz = struct.unpack_from(
+            "<QQQQQ", data, offset + 8
+        )
         if p_type != PT_LOAD:
             continue
         load_segments += 1
@@ -68,15 +80,28 @@ def check(path):
             raise CheckError(f"段 {index} 的 p_filesz > p_memsz")
         if p_flags & PF_X and p_vaddr <= e_entry < p_vaddr + p_memsz:
             entry_ok = True
+        # 引导器按 p_paddr 装载，且按页对齐区间申请内存。
+        page_start = p_paddr & ~(PAGE - 1)
+        page_end = (p_paddr + p_memsz + PAGE - 1) & ~(PAGE - 1)
+        span_start = page_start if span_start is None else min(span_start, page_start)
+        span_end = max(span_end, page_end)
 
     if load_segments == 0:
         raise CheckError("没有任何 PT_LOAD 段")
     if not entry_ok:
         raise CheckError(f"入口 0x{e_entry:X} 不在任何可执行 PT_LOAD 段内")
 
+    span_pages = (span_end - span_start) // PAGE
+    if span_pages > MAX_KERNEL_PAGES:
+        raise CheckError(
+            f"装载区间 {span_pages} 页超过引导器预算 MAX_KERNEL_PAGES={MAX_KERNEL_PAGES} "
+            "（内核变大了却没提高预算，引导器会以 35 退出）"
+        )
+
     print(
         f"  ✅ {path}: ELF64/x86-64/ET_EXEC / 入口 0x{e_entry:X} 在可执行段内 / "
-        f"{load_segments} 个 PT_LOAD 段 / {len(data)} 字节"
+        f"{load_segments} 个 PT_LOAD 段 / 装载 {span_pages} 页（预算 {MAX_KERNEL_PAGES}）/ "
+        f"{len(data)} 字节"
     )
 
 

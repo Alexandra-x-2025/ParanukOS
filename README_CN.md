@@ -41,7 +41,7 @@ ParanukOS 的核心理念是 **“强隔离”**。我们相信系统的稳定�
 ### 前置依赖
 
 *   **Rust stable**（已在 1.98 上验证；**不需要** nightly）。
-*   目标平台 `x86_64-unknown-uefi`（引导器）与 `x86_64-unknown-none`（冒烟测试用来编译占位内核镜像）。
+*   目标平台 `x86_64-unknown-uefi`（引导器）与 `x86_64-unknown-none`（内核）。
 *   **QEMU 与 OVMF** —— 仅在运行或测试镜像时需要。
 
 ```bash
@@ -87,7 +87,14 @@ pkill -f 'qemu-system-x86_64.*paranukos'   # 或: kill $(pgrep -f qemu-system-x8
 
 ### 内核镜像
 
-引导器会在 ESP 的 `\EFI\PARANUKO\KERNEL.ELF` 处查找内核镜像，校验它是 ELF64 / x86-64 / `ET_EXEC` 后复制到新分配的物理页中。仓库里目前还没有真正的内核：任意合法的 ELF64 可执行文件都可以用来跑通这条路径（例如编译 `tests/fixtures/dummy_kernel.rs`）。
+内核位于 `crates/kernel`（`x86_64-unknown-none`、`#![no_std]`、链接在 `0x100000`）。引导器会在
+ESP 的 `\EFI\PARANUKO\KERNEL.ELF` 处查找内核镜像，校验它是 ELF64 / x86-64 / `ET_EXEC` 后，
+按 ELF 段装载到各自的链接地址。
+
+运行期内核先安装自己的 IDT，然后依据 `BootInfo` 里的 UEFI 内存图**自建四级恒等映射页表**并写入
+`CR3`：前 2 MiB 用 4 KiB 页、其余用 2 MiB 大块，且只映射与 RAM 区域相交的地址。非 RAM 区域与
+页 0 都刻意保持 not present，因此越界访问或空指针解引用会大声故障（`#PF`），而不是悄悄写到固件
+内存或设备上。接口定义见 [docs/architecture/memory_subsystem_CN.md](docs/architecture/memory_subsystem_CN.md)。
 
 ### 测试
 
@@ -96,12 +103,20 @@ python3 tests/check_pe.py target/x86_64-unknown-uefi/debug/paranukos.efi  # 静�
 bash tests/smoke.sh                                                       # QEMU 端到端冒烟测试
 ```
 
-冒烟测试包含两个用例：正向（ESP 中存在合法内核镜像 → 必须成功引导并载入）与反向（缺少内核镜像 → 必须优雅报错，而不是挂死、崩溃或误报成功）。
+冒烟测试断言的是**精确的 QEMU 退出码**，而不是"打印了点什么"：内核自检通过为 37，装载失败为
+35，`BootInfo` 契约损坏为 39，内存初始化失败为 43，内核崩溃为 41。此外还会在串口日志里核对证据
+（恒等映射规模、切换 `CR3` 后 `BootInfo` 仍可读、故意不映射的页 0 触发 `#PF` 并报告向量 14 与
+`cr2=0x0`）。
 
 ### 已知限制
 
-*   **目前只到 Milestone 0。** 引导器会装载内核、调用 `exit_boot_services` 并跳转到入口；内核随后校验 `BootInfo`、在 COM1 打印摘要并停机。尚无分页、用户态、IPC 与调度 —— 顺序见 `docs/architecture/kernel_interface.md` §9。
+*   **目前只到 Milestone 0–2a。** 引导器会装载内核、调用 `exit_boot_services` 并跳转到入口；
+    内核随后校验 `BootInfo`、安装自己的 IDT 与页表、在 COM1 打印摘要并退出。**尚无内核堆、
+    用户态、IPC 与调度** —— 顺序见 `docs/architecture/kernel_interface.md` §9，M2b 会补上物理
+    页帧分配器与内核堆。
 *   只接受 `ET_EXEC` 内核镜像；PIE（`ET_DYN`）内核需要重定位处理，目前未实现。
+*   内核虽然建立了映射，但还没有按需分页、W^X 与按进程隔离的地址空间；并且**刻意不映射
+    MMIO**：串口走端口 I/O，目前不触碰任何 MMIO 设备。
 
 ## 🗺️ 路线图
 - [ ] **第一阶段：核心基础** (IPC、内存管理、能力模型)

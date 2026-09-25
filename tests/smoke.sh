@@ -7,9 +7,10 @@
 #
 #   33  引导器装载完成（M0 起正常路径不再使用：成功会直接跳入内核）
 #   35  内核镜像装载失败（缺少镜像 / 非 ELF / 段布局非法 / 入口不可执行）
-#   37  内核自检通过（BootInfo 有效 + 内存图可用 + RSDP 存在）
+#   37  内核自检通过（BootInfo 有效 + 内存图可用 + RSDP 存在 + 自建页表已安装）
 #   39  内核自检失败（magic/version 不匹配等）
 #   41  内核发生未处理异常或 panic（意外崩溃）
+#   43  内核内存初始化失败（页表构建/安装、页帧分配器、内核堆）
 #   124 超时：应用没有主动退出（判失败）
 #
 # 退出码常量与 crates/boot-info 保持一致。
@@ -34,6 +35,7 @@ EXIT_LOAD_FAILURE=35
 EXIT_KERNEL_OK=37
 EXIT_KERNEL_FAILURE=39
 EXIT_KERNEL_FAULT=41
+EXIT_KERNEL_MEMORY_FAILURE=43
 
 WORK="$(mktemp -d)"
 ESP_DIR="$(mktemp -d)/esp"
@@ -162,6 +164,25 @@ else
     show_log "$LOG_DIR/m0-positive.log"
 fi
 
+# --- M2a：内核自建的恒等映射页表（memory_subsystem.md §8.3） ---
+grep_log "$LOG_DIR/m0-positive.log" 'paging: 恒等映射' "内核建立并安装了恒等映射页表"
+if grep -qE 'paging: 上限 0x[0-9A-F]+，页表 7 页，CR3=0x[0-9A-F]+' "$LOG_DIR/m0-positive.log"; then
+    ok "页表占用符合预算（7 页 = 28 KiB）"
+else
+    bad "页表页数不是预算内的 7 页"
+    show_log "$LOG_DIR/m0-positive.log"
+fi
+grep_log "$LOG_DIR/m0-positive.log" '切换 CR3 后 BootInfo 仍可读' \
+    "恒等映射确实覆盖了交接结构（切换 CR3 后可重新校验 BootInfo）"
+# 映射规模必须覆盖测试虚拟机的主要内存（QEMU 默认 128 MiB，这里放宽到 64 MiB）
+mapped_mib="$(sed -n 's/.*个 2 MiB 大块（\([0-9]*\) MiB.*/\1/p' "$LOG_DIR/m0-positive.log" | head -1)"
+if [ -n "$mapped_mib" ] && [ "$mapped_mib" -ge 64 ]; then
+    ok "恒等映射规模 ${mapped_mib} MiB（≥ 64 MiB）"
+else
+    bad "恒等映射规模不足或无法解析（读到 '${mapped_mib:-空}'）"
+    show_log "$LOG_DIR/m0-positive.log"
+fi
+
 # --- B. 反向 1：ESP 中没有内核镜像 → 装载失败（35） ---
 boot_case "$WORK/loader.efi" "-" "$LOG_DIR/m0-no-kernel.log" "$EXIT_LOAD_FAILURE" \
     "缺少内核镜像：以 35 失败"
@@ -195,6 +216,25 @@ boot_case "$WORK/loader.efi" "$WORK/KERNEL-fault.ELF" "$LOG_DIR/m1-fault.log" "$
 grep_log "$LOG_DIR/m1-fault.log" '未处理的 CPU 异常' "打印了异常诊断"
 grep_log "$LOG_DIR/m1-fault.log" '#UD' "指认了向量（#UD 非法指令）"
 grep_log "$LOG_DIR/m1-fault.log" 'rip=0x' "打印了出错指令地址"
+
+# --- F. 故障注入：内核页表生效后解引用空指针 → #PF → 41（M2a） ---
+#
+# 页 0 按策略永不映射（memory_subsystem.md §3.4）。固件的恒等映射通常会把页 0 也映射，
+# 所以"读地址 0 会 #PF"正是"生效的是内核自己的页表"的直接证据。
+echo "==> 附加用例：内核自建页表（故障注入）"
+if ! cargo build -p kernel --target "$BARE_TARGET" --features inject-null-deref; then
+    echo "[-] 注入空指针访问的内核构建失败。" >&2
+    exit 1
+fi
+cp "target/${BARE_TARGET}/debug/kernel" "$WORK/KERNEL-null.ELF"
+boot_case "$WORK/loader.efi" "$WORK/KERNEL-null.ELF" "$LOG_DIR/m2a-null-deref.log" "$EXIT_KERNEL_FAULT" \
+    "读取未映射的页 0：内核自己的页表生效并以 41 退出"
+grep_log "$LOG_DIR/m2a-null-deref.log" 'paging: 恒等映射' "崩溃前已完成页表安装"
+grep_log "$LOG_DIR/m2a-null-deref.log" '#PF 页错误' "指认了向量（#PF 页错误）"
+grep_log "$LOG_DIR/m2a-null-deref.log" 'cr2=0x0 ' "CR2 指出出错地址正是页 0"
+
+# 只在注入版里出现的提示，用来确认我们确实走到了那条路径，而不是别的原因导致的 #PF
+grep_log "$LOG_DIR/m2a-null-deref.log" '\[inject\] 故意读取未映射的页 0' "命中注入路径"
 
 echo
 echo "结果: ${pass} 项通过, ${fail} 项失败"

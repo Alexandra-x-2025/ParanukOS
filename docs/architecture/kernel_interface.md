@@ -48,7 +48,9 @@ infrastructure.
 | Copying the image into memory, page by page (**arbitrary address**) | `boot::allocate_pages(AnyPages, …)` |
 | End-to-end smoke test, PE structure check, unit tests, CI | `tests/`, `.github/workflows/ci.yml` |
 | Kernel IDT (32 CPU exceptions), exception/panic diagnostics, serial logging | `crates/kernel/src/idt.rs`, `logging.rs` |
-| Exact exit codes (33 success / 35 load failure / 124 timeout → failure) | `--features qemu-exit` + `run-qemu.sh` |
+| Kernel-side UEFI memory-map parsing (40/48-byte stride, unknown types are not RAM) | `crates/kernel-memory/src/map.rs` (M2a) |
+| Kernel page tables: four-level identity map built from the memory map and installed via `CR3`; only RAM is mapped, page 0 never is | `crates/kernel/src/memory.rs`, `crates/kernel-memory/src/paging.rs` (M2a) |
+| Exact exit codes (33 success / 35 load failure / 43 memory init / 124 timeout → failure) | `--features qemu-exit` + `run-qemu.sh` |
 
 ### 2.2 Gaps (what M0 closes)
 

@@ -42,7 +42,7 @@ A pure Rust implementation of a microkernel that provides:
 ### Prerequisites
 
 *   **Rust stable.** Verified with 1.98; nightly is *not* required.
-*   Targets `x86_64-unknown-uefi` (the bootloader) and `x86_64-unknown-none` (used by the smoke test to build a placeholder kernel image).
+*   Targets `x86_64-unknown-uefi` (the bootloader) and `x86_64-unknown-none` (the kernel).
 *   **QEMU and OVMF** — only needed to run or test the image.
 
 ```bash
@@ -93,7 +93,16 @@ To leave the emulator, press **`Ctrl + A` and then `X`**. Do not use `Ctrl + C`:
 
 ### Kernel image
 
-The bootloader looks for the kernel at `\EFI\PARANUKO\KERNEL.ELF` on the ESP, verifies that it is an ELF64 / x86-64 / `ET_EXEC` image and copies it into freshly allocated pages. There is no real kernel in this repository yet — any valid ELF64 executable works for exercising the path (for example, building `tests/fixtures/dummy_kernel.rs`).
+The kernel lives in `crates/kernel` (`x86_64-unknown-none`, `#![no_std]`, linked at `0x100000`). The
+bootloader looks for it at `\EFI\PARANUKO\KERNEL.ELF` on the ESP, verifies that it is an
+ELF64 / x86-64 / `ET_EXEC` image and loads it segment by segment at its link address.
+
+At runtime the kernel installs its own IDT and then builds and installs its **own four-level
+identity-mapped page tables** from the UEFI memory map in `BootInfo`: the first 2 MiB with 4 KiB
+pages, everything above with 2 MiB blocks, and only addresses that overlap RAM. Non-RAM addresses
+and page 0 are deliberately left not-present, so a stray or null access faults loudly (`#PF`)
+instead of silently touching firmware memory or a device. The interface is specified in
+[docs/architecture/memory_subsystem.md](docs/architecture/memory_subsystem.md).
 
 ### Tests
 
@@ -102,12 +111,23 @@ python3 tests/check_pe.py target/x86_64-unknown-uefi/debug/paranukos.efi  # stat
 bash tests/smoke.sh                                                       # end-to-end QEMU smoke test
 ```
 
-The smoke test covers a positive case (a valid kernel image is present → boot and load must succeed) and a negative case (no kernel image → the loader must fail gracefully rather than hang, crash or report success).
+The smoke test asserts **exact QEMU exit codes** rather than "it printed something": 37 for a kernel
+whose self-check passed, 35 for a loader image failure, 39 for a broken `BootInfo` contract, 43 for a
+memory-initialisation failure, and 41 for a kernel fault. It also checks the serial log for evidence
+(identity-mapping size, `BootInfo` still readable after the `CR3` switch, `#PF` naming vector 14 and
+`cr2=0x0` for the deliberately unmapped null page).
 
 ### Known limitations
 
-*   **Milestone 0 only.** The bootloader loads the kernel, calls `exit_boot_services` and jumps to the entry point; the kernel then validates `BootInfo`, prints a summary on COM1 and halts. There is no paging, no user mode, no IPC and no scheduler yet — the ordering is listed in `docs/architecture/kernel_interface.md` §9.
-*   Only `ET_EXEC` kernel images are accepted; a PIE (`ET_DYN`) kernel would require relocation handling that is not implemented.
+*   **Milestones 0–2a only.** The bootloader loads the kernel, calls `exit_boot_services` and jumps
+    to the entry point; the kernel validates `BootInfo`, installs its own IDT and page tables, prints
+    a summary on COM1 and exits. There is **no heap, no user mode, no IPC and no scheduler** yet —
+    the ordering is listed in `docs/architecture/kernel_interface.md` §9, and M2b adds the physical
+    frame allocator plus the kernel heap.
+*   Only `ET_EXEC` kernel images are accepted; a PIE (`ET_DYN`) kernel would require relocation
+    handling that is not implemented.
+*   The kernel maps memory but does not use demand paging, W^X or per-process address spaces, and it
+    deliberately does **not** map MMIO: it drives serial as port I/O and touches no MMIO device yet.
 
 ## 🗺️ Roadmap
 - [ ] **Phase 1: Core Foundation** (IPC, Memory Management, Capability Model)
