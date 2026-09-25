@@ -42,6 +42,7 @@ jobs:
       - name: Clippy（内核与基础件）
         run: |
           cargo clippy -p kernel --target x86_64-unknown-none -- -D warnings
+          cargo clippy -p kernel --target x86_64-unknown-none --features inject-fault -- -D warnings
           cargo clippy -p boot-info -p kernel-image --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
 
       - name: 构建（引导器 debug / release）

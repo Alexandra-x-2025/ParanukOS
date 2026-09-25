@@ -9,6 +9,7 @@
 #   35  内核镜像装载失败（缺少镜像 / 非 ELF / 段布局非法 / 入口不可执行）
 #   37  内核自检通过（BootInfo 有效 + 内存图可用 + RSDP 存在）
 #   39  内核自检失败（magic/version 不匹配等）
+#   41  内核发生未处理异常或 panic（意外崩溃）
 #   124 超时：应用没有主动退出（判失败）
 #
 # 退出码常量与 crates/boot-info 保持一致。
@@ -32,6 +33,7 @@ mkdir -p "$LOG_DIR"
 EXIT_LOAD_FAILURE=35
 EXIT_KERNEL_OK=37
 EXIT_KERNEL_FAILURE=39
+EXIT_KERNEL_FAULT=41
 
 WORK="$(mktemp -d)"
 ESP_DIR="$(mktemp -d)/esp"
@@ -143,7 +145,8 @@ boot_case "$WORK/loader.efi" "$WORK/KERNEL.ELF" "$LOG_DIR/m0-positive.log" "$EXI
 grep_log "$LOG_DIR/m0-positive.log" '个 PT_LOAD 段' "引导器按段解析 ELF"
 grep_log "$LOG_DIR/m0-positive.log" '交接准备就绪' "引导器完成交接准备"
 grep_log "$LOG_DIR/m0-positive.log" '\[kernel\] ParanukOS kernel alive' "内核真的开始执行"
-grep_log "$LOG_DIR/m0-positive.log" '\[kernel\] self-check OK' "内核自检通过"
+grep_log "$LOG_DIR/m0-positive.log" 'IDT 已安装' "内核安装了 IDT（M1）"
+grep_log "$LOG_DIR/m0-positive.log" 'self-check OK' "内核自检通过"
 # 内存图条目数必须 > 0（形如 "memory map: 127 项"）
 if grep -qE 'memory map: [1-9][0-9]* 项' "$LOG_DIR/m0-positive.log"; then
     ok "内核读到非空内存图"
@@ -177,8 +180,21 @@ fi
 # --- D. 反向 3：BootInfo.magic 被注入错误 → 内核自检失败（39） ---
 boot_case "$WORK/loader-bad-magic.efi" "$WORK/KERNEL.ELF" "$LOG_DIR/m0-bad-magic.log" "$EXIT_KERNEL_FAILURE" \
     "错误的 BootInfo.magic：内核自检失败并以 39 退出"
-grep_log "$LOG_DIR/m0-bad-magic.log" '\[kernel\] self-check FAILED' "内核报告了自检失败"
+grep_log "$LOG_DIR/m0-bad-magic.log" 'self-check FAILED' "内核报告了自检失败"
 grep_log "$LOG_DIR/m0-bad-magic.log" 'magic 不匹配' "失败原因指明是 magic 不匹配"
+
+# --- E. 故障注入：内核执行 ud2 → 异常处理器报告并以 41 退出 ---
+echo "==> 附加用例：异常处理器（故障注入）"
+if ! cargo build -p kernel --target "$BARE_TARGET" --features inject-fault; then
+    echo "[-] 注入故障的内核构建失败。" >&2
+    exit 1
+fi
+cp "target/${BARE_TARGET}/debug/kernel" "$WORK/KERNEL-fault.ELF"
+boot_case "$WORK/loader.efi" "$WORK/KERNEL-fault.ELF" "$LOG_DIR/m1-fault.log" "$EXIT_KERNEL_FAULT" \
+    "内核触发 #UD：异常处理器报告并以 41 退出"
+grep_log "$LOG_DIR/m1-fault.log" '未处理的 CPU 异常' "打印了异常诊断"
+grep_log "$LOG_DIR/m1-fault.log" '#UD' "指认了向量（#UD 非法指令）"
+grep_log "$LOG_DIR/m1-fault.log" 'rip=0x' "打印了出错指令地址"
 
 echo
 echo "结果: ${pass} 项通过, ${fail} 项失败"
