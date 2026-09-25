@@ -12,7 +12,7 @@ ParanukOS is built on the principle of **Strict Isolation**. We believe that sys
 
 *   **Microkernel Core:** Only handles IPC, memory management, and basic scheduling.
 *   **High Reliability:** A crash in a driver or file system service does not bring down the entire OS.
-*   **Modern Hardware Focus:** Optimized specifically for the last 10 generations of hardware.
+*   **Modern Hardware Focus (explicitly bounded):** x86-64 + UEFI + ACPI 6.x only — no BIOS/CSM, no 32-bit x86, no legacy device support.
 *   **Wasm-First Application Layer:** Provides a secure, sandboxed environment for users to run software via WebAssembly.
 
 ## 🚀 Key Features
@@ -24,12 +24,14 @@ A pure Rust implementation of a microkernel that provides:
 *   **SMP Support:** Native multi-core scheduling and synchronization.
 
 ### 💾 File System Strategy
-*   **Short-term:** A minimal, read-only Ext4/FAT32 compatibility layer for initial development and QEMU testing.
-*   **Long-term:** A pure Rust, user-state **Copy-on-Write (CoW)** file system inspired by TFS, providing physical-level isolation of data writes.
+*   **Now:** FAT32 only — the ESP already is FAT32, so no new driver is needed to read the volume the image was loaded from.
+*   **Later (needs its own interface document):** A pure Rust, user-state **Copy-on-Write (CoW)** file system inspired by TFS, providing physical-level isolation of data writes.
+*   **Explicitly not short-term: read-only Ext4** — extents, the journal, indirect blocks and checksums make it a multi-month effort with almost no payoff during bring-up.
 
 ### 🖥️ Hardware & Booting
 *   **UEFI Bootloader (no GRUB):** A UEFI application built on [uefi-rs](https://github.com/rust-osdev/uefi-rs) 0.39 and compiled for `x86_64-unknown-uefi`. It locates the ESP it was started from, validates the kernel image as an ELF64/x86-64 executable and loads it into memory. GRUB is not used anywhere in the boot path.
 *   **Rust-native Development:** Built from the ground up in Rust to ensure memory safety and eliminate common kernel bugs.
+*   **Interface specification:** The bootloader↔kernel contract — image format and load rules, entry ABI, `BootInfo`, handoff semantics and exit codes — is defined in [docs/architecture/kernel_interface.md](docs/architecture/kernel_interface.md).
 
 ### 🌐 Application Environment
 *   **Web/Wasm Runtime:** The primary environment for user applications, providing a "software store" experience with near-native performance and total isolation.
