@@ -18,7 +18,8 @@
 # （-bios 会把文件当传统 BIOS 镜像处理，直接报 "could not load PC BIOS"）。
 # 若 QEMU 是从非标准前缀运行的，还需自行设置 QEMU_MODULE_DIR。
 #
-# 退出模拟器：先按 Ctrl + A，再按 X。
+# 退出模拟器：先按 Ctrl + A，再按 X（退出码 0）。
+# 退出码含义见文件末尾。
 # 切勿使用 Ctrl + C —— 会造成僵尸 QEMU 进程在后台死锁并霸占串口。
 #
 # 依赖（按发行版）:
@@ -117,10 +118,13 @@ fi
 
 # QEMU 作为子进程运行：脚本被 timeout/kill（含 CI 用例）终止时能一并清理，
 # 避免留下僵尸 QEMU 进程占用串口。
+# isa-debug-exit 的端口必须与 src/main.rs / uefi 的 qemu 特性一致（都是 0xF4）：
+# QEMU 8.2 起该设备默认的 iobase 是 0x501，不显式指定的话应用写入 0xF4 不会生效。
 qemu-system-x86_64 \
     "${qemu_args[@]}" \
     -machine q35 \
     -vga none \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -drive if=pflash,format=raw,readonly=on,file="${OVMF_CODE}" \
     -drive if=pflash,format=raw,file="${VARS_COPY}" \
     -net none \
@@ -142,10 +146,11 @@ wait "${qemu_pid}"
 status=$?
 set -e
 
-# 冒烟测试目前依赖 timeout 终止 QEMU（应用加载完成后自旋等待），
-# 因此 0（手动退出）与 124/137（被 timeout 终止）都视为启动成功。
-# TODO: 接入 isa-debug-exit 后按退出码精确判定，不再吞掉真实崩溃。
-case "${status}" in
-    0 | 124 | 137) exit 0 ;;
-    *) exit "${status}" ;;
-esac
+# 原样上报 QEMU 的退出码。配合 `-device isa-debug-exit`，退出码有明确含义：
+#   0    人类退出（Ctrl + A 然后 X），或固件正常结束
+#   33   引导器报告成功（读取 + ELF 校验 + 载入内存全部完成）
+#   35   引导器报告内核加载失败
+#   9    panic（uefi 的 qemu 特性以 0x04 作为失败码，(4 << 1) | 1 = 9）
+#   124  被 timeout 终止 —— 应用没有主动退出，通常意味着卡死
+# 注意：不再把 124/137 归一化成成功，否则会掩盖真实故障。
+exit "${status}"

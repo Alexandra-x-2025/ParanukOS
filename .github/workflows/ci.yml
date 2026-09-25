@@ -37,6 +37,7 @@ jobs:
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo clippy -p kernel-image --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
+          cargo clippy --all-targets --features qemu-exit -- -D warnings
 
       - name: 构建（debug / release）
         run: |

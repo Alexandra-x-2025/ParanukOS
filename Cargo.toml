@@ -10,6 +10,11 @@ edition = "2024"
 # 因此单元测试由 `cargo test -p kernel-image --target x86_64-unknown-linux-gnu` 承担。
 resolver = "3"
 members = ["crates/kernel-image"]
+[features]
+# 让引导器通过 QEMU 的 isa-debug-exit 设备报告结果（退出码 33=成功 / 35=加载失败），
+# 供自动化测试做精确断言。同时启用 uefi 的 qemu 特性：panic 也走同一机制，
+# 而不是先 stall 再尝试复位。
+qemu-exit = ["uefi/qemu"]
 
 [dependencies]
 # 核心 UEFI 支持。显式关闭默认特性，按需开启：
