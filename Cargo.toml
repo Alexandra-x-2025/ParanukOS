@@ -7,13 +7,14 @@ edition = "2024"
 [workspace]
 # 纯逻辑放在零依赖的独立 crate 中，这样可以在宿主平台上被单元测试覆盖：
 # UEFI 二进制必须 `test = false`（原因见下方 [[bin]] 注释），
-# 因此单元测试由 `cargo test -p kernel-image -p kernel-memory --target x86_64-unknown-linux-gnu` 承担。
+# 因此单元测试由 `cargo test -p kernel-image -p kernel-memory -p kernel-sched --target x86_64-unknown-linux-gnu` 承担。
 resolver = "3"
 members = [
     "crates/boot-info",
     "crates/kernel",
     "crates/kernel-image",
     "crates/kernel-memory",
+    "crates/kernel-sched",
 ]
 [features]
 # 让引导器通过 QEMU 的 isa-debug-exit 设备报告结果（退出码 33=成功 / 35=加载失败），

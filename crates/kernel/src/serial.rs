@@ -39,7 +39,7 @@ pub(crate) unsafe fn outb(port: u16, value: u8) {
 /// # Safety
 /// 调用者必须确保 `port` 是当前平台上一个合法且允许读取的 I/O 端口。
 #[inline]
-unsafe fn inb(port: u16) -> u8 {
+pub(crate) unsafe fn inb(port: u16) -> u8 {
     let value: u8;
     // SAFETY: 由调用者保证端口合法性；`in` 不访问内存。
     unsafe {

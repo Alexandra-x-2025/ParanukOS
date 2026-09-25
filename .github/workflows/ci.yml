@@ -45,7 +45,8 @@ jobs:
           cargo clippy -p kernel --target x86_64-unknown-none --features inject-fault -- -D warnings
           cargo clippy -p kernel --target x86_64-unknown-none --features inject-null-deref -- -D warnings
           cargo clippy -p kernel --target x86_64-unknown-none --features inject-memory-fault -- -D warnings
-          cargo clippy -p boot-info -p kernel-image -p kernel-memory --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
+          cargo clippy -p kernel --target x86_64-unknown-none --features inject-double-fault -- -D warnings
+          cargo clippy -p boot-info -p kernel-image -p kernel-memory -p kernel-sched --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
 
       - name: 构建（引导器 debug / release）
         run: |
@@ -56,9 +57,9 @@ jobs:
         run: cargo build -p kernel --target x86_64-unknown-none
 
       - name: 单元测试（宿主平台）
-        # 可单测的纯逻辑在 crates/boot-info、crates/kernel-image 与 crates/kernel-memory；
+        # 可单测的纯逻辑在 crates/boot-info、crates/kernel-image、crates/kernel-memory 与 crates/kernel-sched；
         # UEFI 二进制与内核二进制都必须 test = false（std 测试框架与各自的 panic 处理器冲突）
-        run: cargo test -p boot-info -p kernel-image -p kernel-memory --target x86_64-unknown-linux-gnu
+        run: cargo test -p boot-info -p kernel-image -p kernel-memory -p kernel-sched --target x86_64-unknown-linux-gnu
 
       - name: 校验产物为 PE32+ EFI 应用
         # 用结构解析而不是 `file` 的输出措辞做断言：后者的措辞会随 binutils 版本变化
