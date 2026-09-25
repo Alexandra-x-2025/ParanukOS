@@ -28,7 +28,7 @@ A microkernel implemented in pure Rust, providing:
 *   **Explicitly not short-term: read-only Ext4.** Extents, the journal, indirect blocks and checksums make it a multi-month effort that buys almost nothing during bring-up, and no milestone in `docs/architecture/kernel_interface.md` depends on it.
 
 ### 🖥️ Hardware & Booting
-*   **UEFI bootloader (no GRUB):** a UEFI application built on [uefi-rs](https://github.com/rust-osdev/uefi-rs) 0.39 and compiled for `x86_64-unknown-uefi`. It locates the ESP it was started from, validates the kernel image as an ELF64/x86-64 executable and loads it into memory. GRUB is not used anywhere in the boot path.
+*   **UEFI bootloader (no GRUB):** a UEFI application built on [uefi-rs](https://github.com/rust-osdev/uefi-rs) 0.39 and compiled for `x86_64-unknown-uefi`. It locates the ESP it was started from, validates the kernel image as an ELF64/x86-64 executable, loads it segment by segment at its link address, then calls `exit_boot_services` and passes control to the kernel entry point with a `BootInfo` structure. GRUB is not used anywhere in the boot path.
 *   **Rust-native development:** built from the ground up in Rust, eliminating memory-safety vulnerabilities.
 *   **Interface specification:** the bootloader↔kernel contract — image format and load rules, entry ABI, `BootInfo`, handoff semantics and exit codes — is defined in [docs/architecture/kernel_interface.md](docs/architecture/kernel_interface.md).
 

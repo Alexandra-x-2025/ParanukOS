@@ -66,10 +66,17 @@ The artifact is a **PE32+ EFI application** (`subsystem = 10`), which is what UE
 ### Running in QEMU
 
 ```bash
-cargo run    # same as: ./run-qemu.sh target/x86_64-unknown-uefi/debug/paranukos.efi
+cargo kernel   # build the kernel (bare-metal target) -> target/x86_64-unknown-none/debug/kernel
+cargo run      # build the bootloader, place the kernel in the ESP, boot with OVMF
 ```
 
-The runner builds a standards-compliant ESP (`/EFI/BOOT/BOOTX64.EFI`) and boots it with OVMF.
+The runner builds a standards-compliant ESP (`/EFI/BOOT/BOOTX64.EFI`), places the kernel at the
+agreed path (`\EFI\PARANUKO\KERNEL.ELF`) and boots it with OVMF. After the kernel prints its
+`BootInfo` summary, QEMU either exits with a status code (when the `qemu-exit` feature is enabled)
+or the CPU halts.
+
+To leave the emulator interactively, press **`Ctrl + A` and then `X`**. Do not use `Ctrl + C`: it
+leaves a zombie QEMU process holding the serial port.
 
 To leave the emulator, press **`Ctrl + A` and then `X`**. Do not use `Ctrl + C`: it leaves a zombie QEMU process holding the serial port.
 
@@ -88,7 +95,7 @@ The smoke test covers a positive case (a valid kernel image is present → boot 
 
 ### Known limitations
 
-*   The bootloader does **not** call `exit_boot_services` or jump to the kernel entry point yet: after validating and loading the image it simply spins. Booting is therefore only asserted up to "image read, validated and loaded into memory".
+*   **Milestone 0 only.** The bootloader loads the kernel, calls `exit_boot_services` and jumps to the entry point; the kernel then validates `BootInfo`, prints a summary on COM1 and halts. There is no paging, no user mode, no IPC and no scheduler yet — the ordering is listed in `docs/architecture/kernel_interface.md` §9.
 *   Only `ET_EXEC` kernel images are accepted; a PIE (`ET_DYN`) kernel would require relocation handling that is not implemented.
 
 ## 🗺️ Roadmap
