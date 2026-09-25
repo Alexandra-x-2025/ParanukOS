@@ -97,6 +97,14 @@ pub fn enter_kernel(stdout: &mut Output, kernel: &LoadedKernel, prepared: Prepar
     // 且此后不再使用任何 boot service。
     let memory_map = unsafe { boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
 
+    // **立刻关闭中断**：退出引导服务后固件的中断向量与处理程序都不再有效，
+    // 此时若有遗留的硬件中断到达，CPU 会跳进已失效的固件 ISR 并破坏内存
+    // （实测表现为 BootInfo 被局部改写、且随代码布局变化而时有时无）。
+    // SAFETY: `cli` 只清除 IF 标志。
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+    }
+
     // 退出之后仍然可以安全地做纯内存读写，因此现在写入 BootInfo。
     #[allow(unused_mut)]
     let mut info = BootInfo {
