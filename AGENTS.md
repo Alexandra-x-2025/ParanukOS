@@ -7,6 +7,7 @@
 ## 🚨 针对 ParanukOS (no_std / UEFI) 的追加规范（修改提示）
 1. **防锁死终端条例（Exit QEMU gracefully）：**
    * 由于测试采用 `-nographic` 模式，验证成功后，AI 必须明确指示用户使用 `Ctrl + A` 继而按 `X` 来退出模拟器，严禁使用 `Ctrl + C`，防止僵尸 QEMU 进程在后台死锁并霸占物理串口。
+   * 若用户反馈"按键无反应"，**不要**让其反复尝试：这通常意味着该 QEMU 的标准输入不是终端（检查 `readlink /proc/<pid>/fd/0`，若为 `/dev/null` 即命中）。此时应指导用户在另一个终端执行 `pkill -f 'qemu-system-x86_64.*paranukos'`；并检查 `run-qemu.sh` 是否仍以前台 `exec` 方式启动 QEMU（后台 `&` 会让 stdin 变成 `/dev/null`，mux 按键彻底失效）。
 2. **零幻觉依赖控制（No std crate pollution）：**
    * 在引入任何第三方 Crates 之前，必须对包进行审计，确保其带有 `default-features = false` 或原生支持 `#![no_std]`。严禁引入任何隐式依赖标准库的组件，否则编译链将直接崩溃。
 3. **宿主机环境状态感知（Host Environment）：**
