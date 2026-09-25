@@ -1,0 +1,10 @@
+[package]
+name = "boot-info"
+version = "0.1.0"
+edition = "2024"
+description = "ParanukOS 引导器与内核之间共享的 BootInfo 结构与协议常量"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# 有意保持零依赖：引导器与内核都要依赖它，且需能在宿主平台跑单元测试。
