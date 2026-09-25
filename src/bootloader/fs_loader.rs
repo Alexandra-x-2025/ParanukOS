@@ -7,11 +7,11 @@
 
 use core::fmt::Write;
 
+use uefi::CStr16;
 use uefi::boot::{self, AllocateType, MemoryType, PAGE_SIZE};
 use uefi::fs::{self, FileSystem};
 use uefi::prelude::*;
 use uefi::proto::console::text::Output;
-use uefi::CStr16;
 
 /// 内核镜像在 ESP 中的约定路径。
 const KERNEL_PATH: &CStr16 = cstr16!("\\EFI\\PARANUKO\\KERNEL.ELF");

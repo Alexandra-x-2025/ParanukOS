@@ -42,7 +42,7 @@ impl UefiBlockIo {
 
     /// 校验缓冲区长度是否为块大小的整数倍。
     fn check_buffer(buffer_len: usize, block_size: u32) -> Result<()> {
-        if block_size == 0 || buffer_len % block_size as usize != 0 {
+        if block_size == 0 || !buffer_len.is_multiple_of(block_size as usize) {
             return Err(Error::new(Status::INVALID_PARAMETER, ()));
         }
         Ok(())
