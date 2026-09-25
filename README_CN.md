@@ -1,4 +1,4 @@
-# ParanukOS 项目愿景
+# ParanukOS
 
 [English](README.md) | [中文]
 
@@ -27,12 +27,66 @@ ParanukOS 的核心理念是 **“强隔离”**。我们相信系统的稳定�
 *   **长期押注：** 基于 TFS 设计理念，用纯 Rust 在用户态实现 **写时复制 (CoW)** 文件系统，实现物理级别的数据写入隔离。
 
 ### 🖥️ 硬件与启动
-*   **重构的 GRUB:** 使用 Rust 开发的定制化启动加载器，仅支持最近 10 代硬件，降低复杂度并提高安全性。
+*   **UEFI 引导器（不使用 GRUB）：** 基于 [uefi-rs](https://github.com/rust-osdev/uefi-rs) 0.39、以 `x86_64-unknown-uefi` 编译的 UEFI 应用。它会定位自己被加载时所在的 ESP 卷，校验内核镜像是 ELF64/x86-64 可执行文件，然后载入内存。整个引导路径中不使用 GRUB。
 *   **Rust 原生开发:** 从底层开始使用 Rust 构建，消除内存安全漏洞。
 
 ### 🌐 应用环境
 *   **Web/Wasm 运行时:** 用户应用的主要运行环境，提供接近原生性能的沙箱化软件商店体验。
 *   **极简 POSIX 层:** 仅为驱动程序和基础系统服务提供必要的兼容性接口。
+
+## 🛠️ 快速开始
+
+### 前置依赖
+
+*   **Rust stable**（已在 1.98 上验证；**不需要** nightly）。
+*   目标平台 `x86_64-unknown-uefi`（引导器）与 `x86_64-unknown-none`（冒烟测试用来编译占位内核镜像）。
+*   **QEMU 与 OVMF** —— 仅在运行或测试镜像时需要。
+
+```bash
+rustup target add x86_64-unknown-uefi x86_64-unknown-none
+
+# Ubuntu / Debian
+sudo apt install qemu-system-x86 ovmf
+# Fedora / RHEL
+sudo dnf install qemu-system-x86 edk2-ovmf
+```
+
+### 构建
+
+```bash
+cargo build            # 产物: target/x86_64-unknown-uefi/debug/paranukos.efi
+cargo build --release  # 产物: target/x86_64-unknown-uefi/release/paranukos.efi
+```
+
+产物是 **PE32+ EFI 应用**（`subsystem = 10`），即 UEFI 固件可以加载的格式。目标平台已在 `.cargo/config.toml` 中默认为 `x86_64-unknown-uefi`；`x86_64-unknown-none` 产出的是 ELF，固件无法引导。
+
+### 在 QEMU 中运行
+
+```bash
+cargo run    # 等价于 ./run-qemu.sh target/x86_64-unknown-uefi/debug/paranukos.efi
+```
+
+启动脚本会建立符合规范的 ESP 目录树（`/EFI/BOOT/BOOTX64.EFI`），并用 OVMF 引导它。
+
+退出模拟器：**先按 `Ctrl + A`，再按 `X`**。请勿使用 `Ctrl + C`，否则会留下僵尸 QEMU 进程并霸占串口。
+
+### 内核镜像
+
+引导器会在 ESP 的 `\EFI\PARANUKO\KERNEL.ELF` 处查找内核镜像，校验它是 ELF64 / x86-64 / `ET_EXEC` 后复制到新分配的物理页中。仓库里目前还没有真正的内核：任意合法的 ELF64 可执行文件都可以用来跑通这条路径（例如编译 `tests/fixtures/dummy_kernel.rs`）。
+
+### 测试
+
+```bash
+python3 tests/check_pe.py target/x86_64-unknown-uefi/debug/paranukos.efi  # 静态校验 PE 结构
+bash tests/smoke.sh                                                       # QEMU 端到端冒烟测试
+```
+
+冒烟测试包含两个用例：正向（ESP 中存在合法内核镜像 → 必须成功引导并载入）与反向（缺少内核镜像 → 必须优雅报错，而不是挂死、崩溃或误报成功）。
+
+### 已知限制
+
+*   引导器目前**尚未**调用 `exit_boot_services`，也尚未跳转到内核入口：校验并载入镜像后会停在自旋状态。因此"能引导"目前只断言到"镜像被读取、校验并载入内存"。
+*   只接受 `ET_EXEC` 内核镜像；PIE（`ET_DYN`）内核需要重定位处理，目前未实现。
 
 ## 🗺️ 路线图
 - [ ] **第一阶段：核心基础** (IPC、内存管理、能力模型)
