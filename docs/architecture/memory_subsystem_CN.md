@@ -221,9 +221,13 @@ pub fn first_free_in(&self, start: u64, end: u64) -> Option<PhysFrame>;
 * 页帧 0 永不被管理（低于 `MIN_FREE_ADDR`），因此 `alloc` 绝不会返回它。
 
 ### 5.4 并发
-没有。交接后中断关闭、单核。因此 `FrameAllocator` 就是 `UnsafeCell` 包裹的 `static` 加
-`Sync` 实现——与 M1 的 IDT 同一模式——并明确规定：**在启用中断或第二个核之前必须加锁**
-（M3/M4）。现在塞进一把未经验证的锁，比写清前置条件更糟［决策 #20］。
+M2 内部没有并发：交接后中断关闭、单核，因此 `FrameAllocator` 就是 `UnsafeCell` 包裹的 `static`
+加 `Sync` 实现——与 M1 的 IDT 同一模式——外加一条写明的前置条件「启用中断之前必须加锁」
+［决策 #20］。
+
+> ✅ **M3 已经把这条前置条件落实**：`FrameAllocator` 现在位于一把中断安全 `SpinLock` 之后，
+> 每次调用都经过它（见 [threads_and_scheduling_CN.md](threads_and_scheduling_CN.md) §5）。
+> 因此决策 #20 是**被满足**，而不是被推翻。
 
 ## 6. 内核堆
 

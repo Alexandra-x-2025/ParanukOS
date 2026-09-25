@@ -309,13 +309,13 @@ QEMU 的 `isa-debug-exit` 退出码 = `(value << 1) | 1`。
 | 7 | `isa-debug-exit` 端口不对 | `-device isa-debug-exit,iobase=0xf4,iosize=0x04` + `exit_port=0xf4` |
 | 8 | 内存图用 `sizeof` 而非 `desc_size` 遍历 | 按 §5.3 的告警执行 |
 
-## 9. 里程碑（M3 及以后为占位，**未设计**）
+## 9. 里程碑（M4 及以后为占位，**未设计**）
 
 | 里程碑 | 内容 | 前置 |
 |---|---|---|
 | M1 | 最小 IDT + panic 处理器 + 内核串口日志设施 —— **已完成** | M0 |
 | M2 | [memory_subsystem_CN.md](memory_subsystem_CN.md) —— 内核页表 + 物理页帧分配器（`LOADER_DATA` 视为已占用）+ 内核堆 —— **已完成**（M2a 见 PR #16，M2b 见 PR #17） | M1 |
-| M3 | 单核内核线程/调度骨架 | M2 |
+| M3 | **接口已定义：** [threads_and_scheduling_CN.md](threads_and_scheduling_CN.md) —— GDT/TSS/IST、8259 PIC + PIT、中断安全的锁、共享单一地址空间的内核线程、时钟抢占的轮转调度 | M2 |
 | M4 | 第一个用户态服务（最小特权级切换，暂不定义 IPC 语义） | M3 |
 | M5 | IPC 消息格式 + 能力令牌语义（**此时才谈**，需要真实用户态进程作为约束） | M4 |
 

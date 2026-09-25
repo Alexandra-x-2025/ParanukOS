@@ -335,18 +335,19 @@ interrupt handling.
 | 7 | Wrong `isa-debug-exit` port | `-device isa-debug-exit,iobase=0xf4,iosize=0x04` + `exit_port=0xf4` |
 | 8 | Iterating the memory map with `sizeof` instead of `desc_size` | follow the warning in §5.3 |
 
-## 9. Milestones (M3+ are placeholders, **not designed**)
+## 9. Milestones (M4+ are placeholders, **not designed**)
 
 | Milestone | Content | Requires |
 |---|---|---|
 | M1 | Minimal IDT + panic handler + kernel serial logging — **done** | M0 |
 | M2 | [memory_subsystem.md](memory_subsystem.md) — kernel page tables + physical frame allocator (treating `LOADER_DATA` as in use) + kernel heap — **done** (M2a in PR #16, M2b in PR #17) | M1 |
-| M3 | Single-core kernel thread/scheduling skeleton | M2 |
+| M3 | **Interface defined:** [threads_and_scheduling.md](threads_and_scheduling.md) — GDT/TSS/IST, 8259 PIC + PIT, interrupt-safe locking, kernel threads sharing one address space, preemptive round-robin scheduler | M2 |
 | M4 | First user-space service (minimal privilege switch; no IPC semantics yet) | M3 |
 | M5 | IPC message format + capability token semantics (**only now**, and constrained by real user-space processes) | M4 |
 
 > This table expresses **ordering dependencies only**; it is not a design. Each item needs its own
-> interface document before work starts.
+> interface document before work starts — M2's is [memory_subsystem.md](memory_subsystem.md) and
+> M3's is [threads_and_scheduling.md](threads_and_scheduling.md).
 
 ## 10. Decision record
 
