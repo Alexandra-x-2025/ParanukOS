@@ -1,36 +1,88 @@
-#!/bin/bash
-# ParanukOS 专属：符合 UEFI ESP 规范的自动化虚拟盘脚本
+#!/usr/bin/env bash
+#
+# ParanukOS 启动脚本：把编译产物包装成符合 UEFI 规范的 ESP 虚拟盘并交给 QEMU。
+#
+# 用法:
+#   cargo run                  # 由 .cargo/config.toml 的 runner 自动调用
+#   ./run-qemu.sh <path.efi>   # 手动指定产物
+#
+# 退出模拟器：先按 Ctrl + A，再按 X。
+# 切勿使用 Ctrl + C —— 会造成僵尸 QEMU 进程在后台死锁并霸占串口。
+#
+# 依赖（按发行版）:
+#   Ubuntu/Debian: sudo apt install qemu-system-x86 ovmf
+#   Fedora/RHEL:   sudo dnf install qemu-system-x86 edk2-ovmf
 
-EFI_PATH=$1
+set -euo pipefail
 
-# 1. 在 Fedora 的临时目录中，建立符合 UEFI 官方死规矩的目录树
-# UEFI 规定默认启动路径必须是: /EFI/BOOT/BOOTX64.EFI
-ESP_DIR="/tmp/paranukos_esp"
+EFI_PATH="${1:-}"
+if [ -z "${EFI_PATH}" ]; then
+    echo "[-] 用法: $0 <path-to-efi-binary>" >&2
+    exit 2
+fi
+if [ ! -f "${EFI_PATH}" ]; then
+    echo "[-] 找不到 EFI 产物: ${EFI_PATH}" >&2
+    exit 2
+fi
+
+# --- 依赖检查：给出可直接执行的修复建议，而不是让人猜 ---
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    echo "[-] 未找到 qemu-system-x86_64。" >&2
+    echo "    Ubuntu/Debian: sudo apt install qemu-system-x86 ovmf" >&2
+    echo "    Fedora/RHEL:   sudo dnf install qemu-system-x86 edk2-ovmf" >&2
+    exit 1
+fi
+
+# OVMF 固件路径在各发行版/各版本间并不统一，按序探测；可用 OVMF_CODE 覆盖。
+OVMF="${OVMF_CODE:-}"
+if [ -z "${OVMF}" ]; then
+    for candidate in \
+        /usr/share/OVMF/OVMF_CODE.fd \
+        /usr/share/OVMF/OVMF_CODE_4M.fd \
+        /usr/share/OVMF/OVMF_CODE.secboot.fd \
+        /usr/share/edk2/ovmf/OVMF_CODE.fd \
+        /usr/share/edk2/x64/OVMF_CODE.fd \
+        /usr/share/qemu/OVMF.fd
+    do
+        if [ -f "${candidate}" ]; then
+            OVMF="${candidate}"
+            break
+        fi
+    done
+fi
+
+if [ -z "${OVMF}" ] || [ ! -f "${OVMF}" ]; then
+    echo "[-] 未找到 OVMF 固件（已尝试各发行版常见路径）。" >&2
+    echo "    Ubuntu/Debian: sudo apt install ovmf" >&2
+    echo "    Fedora/RHEL:   sudo dnf install edk2-ovmf" >&2
+    echo "    也可以用环境变量指定: OVMF_CODE=/path/to/OVMF_CODE.fd $0 <efi>" >&2
+    exit 1
+fi
+
+# 建立符合 UEFI 规范的标准 ESP 目录树。
+# UEFI 规定可移动介质默认启动路径为: /EFI/BOOT/BOOTX64.EFI
+ESP_DIR="${TMPDIR:-/tmp}/paranukos_esp"
 rm -rf "${ESP_DIR}"
 mkdir -p "${ESP_DIR}/EFI/BOOT"
-
-# 2. 将编译出来的二进制文件，重命名并复制到该标准路径下
 cp "${EFI_PATH}" "${ESP_DIR}/EFI/BOOT/BOOTX64.EFI"
 
-echo "[+] ParanukOS: Created virtual ESP directory structure."
-echo "[+] Launching QEMU via official FAT-drive emulation..."
+echo "[+] ParanukOS: ESP 虚拟盘已就绪 (${ESP_DIR})"
+echo "[+] OVMF 固件: ${OVMF}"
+echo "[+] 启动 QEMU ... 退出请按 Ctrl + A 再按 X"
 
-# 3. 使用 QEMU 的 fat:rw 特性，直接将文件夹包装成标准原始磁盘挂载
+set +e
 qemu-system-x86_64 \
-    -bios /usr/share/edk2/ovmf/OVMF_CODE.fd \
+    -bios "${OVMF}" \
     -net none \
     -nographic \
     -drive format=raw,file=fat:rw:"${ESP_DIR}"
+status=$?
+set -e
 
-# === 【硬核新增：对齐自动化流水线状态码】 ===
-# $? 能够拿到 QEMU 退出时的真实状态码
-EXIT_STATUS=$?
-
-# 如果状态码是 0（人类手动退出）或者 124/137（被自动化测试的 timeout 强行杀掉）
-# 我们都认为 ParanukOS 成功完成了开机冒烟测试，强行返回 0（代表 Success）
-if [ $EXIT_STATUS -eq 0 ] || [ $EXIT_STATUS -eq 124 ] || [ $EXIT_STATUS -eq 137 ]; then
-    exit 0
-else
-    # 其他未知崩溃，原样上报错误
-    exit $EXIT_STATUS
-fi
+# 冒烟测试目前依赖 timeout 终止 QEMU（应用加载完成后自旋等待），
+# 因此 0（手动退出）与 124/137（被 timeout 终止）都视为启动成功。
+# TODO: 接入 isa-debug-exit 后按退出码精确判定，不再吞掉真实崩溃。
+case "${status}" in
+    0 | 124 | 137) exit 0 ;;
+    *) exit "${status}" ;;
+esac

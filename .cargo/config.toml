@@ -1,13 +1,11 @@
 [build]
-target = "x86_64-unknown-none"
+# UEFI 应用必须是 PE32+（subsystem = EFI application）。
+# x86_64-unknown-none 产出的是 ELF，固件无法加载，因此使用 uefi-rs 官方推荐的
+# x86_64-unknown-uefi：它自带正确的链接脚本，并自动生成 .efi 后缀。
+target = "x86_64-unknown-uefi"
 
-[target.x86_64-unknown-none]
-rustflags = [
-    "-C", "link-arg=-Tlinker/linker.ld",
-    "-C", "panic=abort",
-    "-C", "target-feature=+crt0",
-]
-
-# Runner 配置：隐藏 QEMU 启动逻辑
-# 我们使用 shell 命令来模拟 run-qemu.sh 的行为：创建临时 ESP 并启动 QEMU
-runner = "bash -c 'mkdir -p /tmp/paranukos_esp/EFI/BOOT; cp target/x86_64-unknown-none/debug/paranukos.efi /tmp/paranukos_esp/EFI/BOOT/BOOTX64.EFI && qemu-system-x86_64 -bios /usr/share/edk2/ovmf/OVMF_CODE.fd -net none -nographic -drive format=raw,file=fat:rw:/tmp/paranukos_esp'"
+[target.x86_64-unknown-uefi]
+# QEMU 启动逻辑统一收口到 run-qemu.sh。
+# cargo 会把编译产物路径作为第一个参数传入，因此脚本里不再需要写死路径。
+# 注意：请在仓库根目录执行 cargo run（runner 使用相对路径调用脚本）。
+runner = "./run-qemu.sh"

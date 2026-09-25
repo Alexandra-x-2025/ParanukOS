@@ -1,69 +1,77 @@
-use uefi::proto::media::block::{BlockIO, BlockIOMedia, Lba};
-use uefi::Result;
+//! UEFI Block I/O 协议的薄封装。
+//!
+//! 目前尚无调用方（属于后续块设备服务的基础件），但保持可编译、语义正确。
 
-/// Represents a block device that can be read from or written to.
+use uefi::proto::media::block::BlockIO;
+use uefi::{Error, Result, Status};
+
+/// 可读写的块设备抽象。
 pub trait BlockDevice {
-    /// Returns the size of the media in bytes.
+    /// 返回介质总字节数。
     fn size(&self) -> Result<u64>;
 
-    /// Returns the block size of the media.
+    /// 返回介质块大小（字节）。
     fn block_size(&self) -> Result<u32>;
 
-    /// Reads a number of blocks from the device starting at a given LBA into a buffer.
+    /// 从给定 LBA 读取数据到 `buffer`，返回实际读取的字节数。
+    ///
+    /// `buffer.len()` 必须是块大小的整数倍（UEFI 规范要求）。
     fn read_blocks(&self, lba: u64, buffer: &mut [u8]) -> Result<usize>;
 
-    /// Writes a number of blocks to the device starting at a given LBA from a buffer.
-    fn write_blocks(&self, lba: u64, buffer: &[u8]) -> Result<usize>;
+    /// 从 `buffer` 写入数据到给定 LBA，返回实际写入的字节数。
+    ///
+    /// `buffer.len()` 必须是块大小的整数倍（UEFI 规范要求）。
+    fn write_blocks(&mut self, lba: u64, buffer: &[u8]) -> Result<usize>;
 }
 
-/// A concrete implementation of `BlockDevice` using the UEFI BlockIO protocol.
+/// 基于 UEFI `BlockIO` 协议的 [`BlockDevice`] 实现。
 pub struct UefiBlockIo {
     protocol: BlockIO,
 }
 
 impl UefiBlockIo {
-    /// Creates a new `UefiBlockIo` instance from a `BlockIO` protocol handle.
+    /// 由 `BlockIO` 协议实例创建封装。
     pub fn new(protocol: BlockIO) -> Self {
         Self { protocol }
     }
 
-    /// Returns the media ID for the device.
+    /// 返回介质 ID。
     pub fn media_id(&self) -> u32 {
-        self.protocol.media().media_id
+        self.protocol.media().media_id()
+    }
+
+    /// 校验缓冲区长度是否为块大小的整数倍。
+    fn check_buffer(buffer_len: usize, block_size: u32) -> Result<()> {
+        if block_size == 0 || buffer_len % block_size as usize != 0 {
+            return Err(Error::new(Status::INVALID_PARAMETER, ()));
+        }
+        Ok(())
     }
 }
 
 impl BlockDevice for UefiBlockIo {
     fn size(&self) -> Result<u64> {
+        // BlockIOMedia 只提供 last_block（最后一个块的下标），
+        // 因此字节数 = (last_block + 1) * block_size。
         let media = self.protocol.media();
-        Ok(media.size as u64)
+        Ok((media.last_block() + 1) * u64::from(media.block_size()))
     }
 
     fn block_size(&self) -> Result<u32> {
-        let media = self.protocol.media();
-        Ok(media.block_size)
+        Ok(self.protocol.media().block_size())
     }
 
     fn read_blocks(&self, lba: u64, buffer: &mut [u8]) -> Result<usize> {
-        // Note: This is a simplified implementation. 
-        // In a real bootloader, we'd need to handle block alignment and potential multi-block reads.
-        let mut read_bytes = 0;
-        for chunk in buffer.chunks_mut(4096) { // Assuming 4KB blocks for now as an example
-            self.protocol.read_blocks(self.media_id(), Lba(lba), chunk)?;
-            read_bytes += chunk.len();
-            lba += (chunk.len() / self.block_size().unwrap() as usize) as u64;
-        }
-        Ok(read_bytes)
+        let block_size = self.block_size()?;
+        Self::check_buffer(buffer.len(), block_size)?;
+        self.protocol.read_blocks(self.media_id(), lba, buffer)?;
+        Ok(buffer.len())
     }
 
-    fn write_blocks(&self, lba: u64, buffer: &[u8]) -> Result<usize> {
-        // Similar to read_blocks but for writing.
-        let mut written_bytes = 0;
-        for chunk in buffer.chunks(4096) {
-            self.protocol.write_blocks(self.media_id(), Lba(lba), chunk)?;
-            written_bytes += chunk.len();
-            lba += (chunk.len() / self.block_size().unwrap() as usize) as u64;
-        }
-        Ok(written_bytes)
+    fn write_blocks(&mut self, lba: u64, buffer: &[u8]) -> Result<usize> {
+        let block_size = self.block_size()?;
+        Self::check_buffer(buffer.len(), block_size)?;
+        self.protocol.write_blocks(self.media_id(), lba, buffer)?;
+        Ok(buffer.len())
     }
 }
