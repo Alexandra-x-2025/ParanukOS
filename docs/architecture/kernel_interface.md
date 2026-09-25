@@ -270,6 +270,7 @@ QEMU's `isa-debug-exit` exit code is `(value << 1) | 1`.
 | **37** | **Kernel self-check passed** (`BootInfo` valid, memory map usable, RSDP present) | **kernel** | implemented (M0) |
 | **39** | **Kernel self-check failed** — the kernel concluded it cannot run (magic/version mismatch, missing memory map, no RSDP) | **kernel** | implemented (M0) |
 | **41** | **Kernel fault or panic** — an unhandled CPU exception (`#UD`, `#GP`, `#PF`, …) or a `panic!` | **kernel** | implemented (M1) |
+| **43** | **Kernel memory initialisation failed** — page tables, frame allocator or heap; see [memory_subsystem.md](memory_subsystem.md) §7.1 | **kernel** | reserved (M2) |
 | 124 | Timed out without exiting (treated as a hang) | — | implemented (fails) |
 
 **33 and 37 must stay distinct**: otherwise the test cannot tell "the bootloader loaded and stopped"
@@ -329,12 +330,12 @@ interrupt handling.
 | 7 | Wrong `isa-debug-exit` port | `-device isa-debug-exit,iobase=0xf4,iosize=0x04` + `exit_port=0xf4` |
 | 8 | Iterating the memory map with `sizeof` instead of `desc_size` | follow the warning in §5.3 |
 
-## 9. Later milestones (placeholders, **not designed**)
+## 9. Later milestones (M3+ are placeholders, **not designed**)
 
 | Milestone | Content | Requires |
 |---|---|---|
 | M1 | Minimal IDT + panic handler + kernel serial logging — **done** | M0 |
-| M2 | Physical frame allocator (driven by the memory map from M0, treating `LOADER_DATA` as in use) + kernel heap | M1 |
+| M2 | **Interface defined:** [memory_subsystem.md](memory_subsystem.md) — kernel page tables + physical frame allocator (driven by the memory map from M0, treating `LOADER_DATA` as in use) + kernel heap; delivered as M2a/M2b | M1 |
 | M3 | Single-core kernel thread/scheduling skeleton | M2 |
 | M4 | First user-space service (minimal privilege switch; no IPC semantics yet) | M3 |
 | M5 | IPC message format + capability token semantics (**only now**, and constrained by real user-space processes) | M4 |
