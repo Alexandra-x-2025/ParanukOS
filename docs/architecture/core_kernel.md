@@ -1,38 +1,40 @@
-# ParanukOS 微内核核心架构设计 (Core Kernel Architecture)
+# ParanukOS Microkernel Core Architecture
 
-## 1. 设计目标
-*   **最小化内核态：** 内核仅负责最基础的硬件抽象、任务调度和进程间通信（IPC）。
-*   **高可靠性：** 通过将所有驱动程序和系统服务移至用户态，确保单个服务的崩溃不会导致整个系统挂掉。
-*   **Rust 安全性：** 利用 Rust 的所有权模型消除内存安全问题，并利用 `no_std` 环境构建极简内核。
+[English] | [中文](core_kernel_CN.md)
 
-## 2. 核心组件 (Core Components)
+## 1. Design Goals
+*   **Minimal kernel mode:** the kernel only handles the most fundamental hardware abstraction, task scheduling and inter-process communication (IPC).
+*   **High reliability:** by moving every driver and system service into user mode, a crash in a single service cannot take the whole system down.
+*   **Rust safety:** leverage Rust's ownership model to eliminate memory-safety bugs, and build a deliberately small kernel in a `no_std` environment.
 
-### A. 进程间通信 (IPC Mechanism)
-这是微内核的灵魂。ParanukOS 将采用 **基于能力的异步消息传递**：
-*   **零拷贝 (Zero-copy):** 利用共享内存页（Shared Memory Pages）在不同用户态服务之间传输大数据块。
-*   **同步/异步混合:** 提供简单的同步调用接口（用于驱动程序交互）和高性能的异步消息队列（用于网络栈和文件系统）。
+## 2. Core Components
 
-### B. 内存管理 (Memory Management)
-*   **页表管理:** 内核负责维护物理内存到虚拟内存的映射。
-*   **能力模型 (Capability Model):** 每个进程不直接拥有硬件资源，而是持有“能力令牌”。例如，一个驱动程序必须持有特定的“I/O 端口访问权”才能操作硬件。
+### A. IPC Mechanism
+IPC is the soul of a microkernel. ParanukOS will use **capability-based asynchronous message passing**:
+*   **Zero-copy:** transfer large payloads between user-space services through shared memory pages.
+*   **Hybrid sync/async:** provide a simple synchronous call interface (for driver interaction) and high-performance asynchronous message queues (for the network stack and file systems).
 
-### C. 任务调度 (Scheduling)
-*   **多核支持 (SMP):** 支持对称多处理，确保用户态服务可以并行运行在不同核心上。
-*   **优先级调度:** 为系统关键服务（如块设备驱动）提供高优先级保障。
+### B. Memory Management
+*   **Page table management:** the kernel maintains the physical-to-virtual memory mappings.
+*   **Capability model:** processes never own hardware resources directly; they hold capability tokens instead. A driver, for example, must hold a specific "I/O port access" capability before it can touch hardware.
 
-## 3. 用户态服务架构 (User-space Services)
-所有非核心功能均作为独立的进程运行：
-*   **Block Device Service:** 处理物理磁盘读写，负责基础的扇区管理。
-*   **CoW File System Service:** 基于 TFS 设计，在用户态处理逻辑卷和写时复制。
-*   **Network Stack Service:** 独立运行的 TCP/IP 协议栈。
-*   **Driver Services:** 包括显卡、网卡等硬件驱动。
+### C. Scheduling
+*   **SMP support:** symmetric multiprocessing, so user-space services can run in parallel on different cores.
+*   **Priority scheduling:** system-critical services (such as the block device driver) get high-priority guarantees.
 
-## 4. 安全隔离模型 (Isolation Model)
-*   **系统空间 vs 应用空间:** 严格通过页表隔离内核态与用户态。
-*   **服务间隔离:** 每个用户态服务运行在独立的地址空间中，只能通过受控的 IPC 通道进行通信。
-*   **Wasm 沙箱:** 用户应用完全运行在 Wasm 环境中，通过 WASI 接口请求系统服务的协助。
+## 3. User-space Services
+Every non-core function runs as an independent process:
+*   **Block Device Service:** physical disk I/O and low-level sector management.
+*   **CoW File System Service:** logical volumes and copy-on-write handling in user space, based on the TFS design.
+*   **Network Stack Service:** an independently running TCP/IP stack.
+*   **Driver Services:** hardware drivers including graphics and network adapters.
 
-## 5. 下一步行动计划 (Next Steps)
-1.  [ ] 定义 IPC 消息格式与协议规范。
-2.  [ ] 设计基于能力的权限分配模型。
-3.  [ ] 实现基础的内存页管理逻辑。
+## 4. Isolation Model
+*   **System space vs. application space:** kernel mode and user mode are strictly separated by page tables.
+*   **Service-to-service isolation:** each user-space service runs in its own address space and can only communicate through controlled IPC channels.
+*   **Wasm sandbox:** user applications run entirely inside a Wasm environment and request system services through WASI.
+
+## 5. Next Steps
+1.  [ ] Define the IPC message format and protocol specification.
+2.  [ ] Design the capability-based permission model.
+3.  [ ] Implement the basic memory page management logic.
