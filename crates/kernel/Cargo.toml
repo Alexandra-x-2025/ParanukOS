@@ -13,6 +13,9 @@ boot-info = { path = "../boot-info" }
 # 内存子系统：UEFI 内存图解析 + 恒等映射页表构建（纯逻辑，宿主平台有单元测试）
 kernel-memory = { path = "../kernel-memory" }
 
+# 调度器纯逻辑：线程表、就绪队列、轮转、回收（宿主平台有单元测试）
+kernel-sched = { path = "../kernel-sched" }
+
 [features]
 # 仅用于测试：自检通过后故意执行 `ud2`，以覆盖异常处理器路径（退出码 41）。
 # 生产构建绝不启用。
@@ -26,3 +29,6 @@ inject-null-deref = []
 # `inject-double-alloc`）。内存自检必须发现"两次分配返回了同一个页帧"并以退出码 43 结束。
 # 生产构建绝不启用。
 inject-memory-fault = ["kernel-memory/inject-double-alloc"]
+# 仅用于测试：调度器起来之后执行 `int $8`，验证 `#DF` 会落在 IST1 栈上并打印诊断，
+# 而不是三重故障重启。生产构建绝不启用。
+inject-double-fault = []
