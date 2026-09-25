@@ -2,7 +2,7 @@
 
 [English](kernel_interface.md) | [中文]
 
-> **状态：接口 v0 已定稿。实现状态：未实现（M0 尚未开工）。**
+> **状态：接口 v0 已定稿。实现状态：M0、M1、M2 均已实现，并在 QEMU + OVMF 上验证通过。**
 >
 > 本文只定义**引导器与内核之间的接口**，以及第一个可验证的里程碑。
 > 微内核本体（IPC、能力模型、调度、用户态服务、Wasm）**不在本文范围**，
@@ -48,6 +48,8 @@
 | 内核 IDT（32 个 CPU 异常）、异常/panic 诊断、串口日志 | `crates/kernel/src/idt.rs`、`logging.rs` |
 | 内核侧解析 UEFI 内存图（40/48 字节步长、未知类型不算 RAM） | `crates/kernel-memory/src/map.rs`（M2a） |
 | 内核页表：由内存图构建、经 `CR3` 安装的四级恒等映射；只映射 RAM，页 0 永不映射 | `crates/kernel/src/memory.rs`、`crates/kernel-memory/src/paging.rs`（M2a） |
+| 物理页帧分配器（conventional 内存上的位图、最低地址优先、连续分配、两张位图以便 `free` 拒绝从未属于它的页帧） | `crates/kernel-memory/src/frame.rs`（M2b） |
+| 内核堆（1 MiB，块头在竞技场内的首次匹配空闲链表，接入 `#[global_allocator]`） | `crates/kernel-memory/src/heap.rs`、`crates/kernel/src/heap.rs`（M2b） |
 | 精确退出码（33 成功 / 35 装载失败 / 43 内存初始化 / 124 超时判失败） | `--features qemu-exit` + `run-qemu.sh` |
 
 ### 2.2 缺口（M0 要补的）
@@ -252,7 +254,7 @@ QEMU 的 `isa-debug-exit` 退出码 = `(value << 1) | 1`。
 | **37** | **内核自检通过**（`BootInfo` 有效 + 内存图可用 + RSDP 存在） | **内核** | 已实现（M0） |
 | **39** | **内核自检失败** —— 内核判定自己无法继续（magic/version 不匹配、内存图缺失、无 RSDP） | **内核** | 已实现（M0） |
 | **41** | **内核未处理异常或 panic** —— CPU 异常（`#UD`、`#GP`、`#PF` 等）或 `panic!` | **内核** | 已实现（M1） |
-| **43** | **内核内存初始化失败** —— 页表、页帧分配器或堆；见 [memory_subsystem_CN.md](memory_subsystem_CN.md) §7.1 | **内核** | 保留（M2） |
+| **43** | **内核内存初始化失败** —— 页表、页帧分配器或堆；见 [memory_subsystem_CN.md](memory_subsystem_CN.md) §7.1 | **内核** | 已实现（M2） |
 | 124 | 超时未退出（判为卡死） | — | 已实现（判失败） |
 
 **33 与 37 必须分开**：否则测试无法区分"引导器装完就停了"与"内核真的跑起来了"，
@@ -286,13 +288,13 @@ QEMU 的 `isa-debug-exit` 退出码 = `(value << 1) | 1`。
 | 5 | `tests/smoke.sh` | 新增 M0 用例：断言退出码 37 + 断言串口出现内核自检行 |
 
 ### 8.4 验收标准（每条可机器判定）
-- [ ] `cargo build -p kernel` 产出的 ELF：`e_type=2`、`e_machine=62`、`e_entry` 落在可执行 `PT_LOAD` 段内；
-- [ ] 引导器产物仍为 PE32+ / subsystem=10；
-- [ ] 冒烟测试断言退出码 **37**（内核自检通过），而**不是** 33；
-- [ ] 串口日志含内核输出，且其中内存图条目数 **> 0**、`rsdp != 0`（QEMU+OVMF 下应成立）；
-- [ ] **反例 1**：`KERNEL.ELF` 换成非 ELF → 退出码 **35**；
-- [ ] **反例 2**：注入错误的 `BootInfo.magic` → 内核自检失败，退出码 **39**；
-- [ ] 现有 9 项断言不回归。
+- [x] `cargo build -p kernel` 产出的 ELF：`e_type=2`、`e_machine=62`、`e_entry` 落在可执行 `PT_LOAD` 段内；
+- [x] 引导器产物仍为 PE32+ / subsystem=10；
+- [x] 冒烟测试断言退出码 **37**（内核自检通过），而**不是** 33；
+- [x] 串口日志含内核输出，且其中内存图条目数 **> 0**、`rsdp != 0`（QEMU+OVMF 下应成立）；
+- [x] **反例 1**：`KERNEL.ELF` 换成非 ELF → 退出码 **35**；
+- [x] **反例 2**：注入错误的 `BootInfo.magic` → 内核自检失败，退出码 **39**；
+- [x] 现有 9 项断言不回归。
 
 ### 8.5 已知坑与规避（按踩中概率排序）
 
@@ -307,12 +309,12 @@ QEMU 的 `isa-debug-exit` 退出码 = `(value << 1) | 1`。
 | 7 | `isa-debug-exit` 端口不对 | `-device isa-debug-exit,iobase=0xf4,iosize=0x04` + `exit_port=0xf4` |
 | 8 | 内存图用 `sizeof` 而非 `desc_size` 遍历 | 按 §5.3 的告警执行 |
 
-## 9. 后续里程碑（M3 及以后为占位，**未设计**）
+## 9. 里程碑（M3 及以后为占位，**未设计**）
 
 | 里程碑 | 内容 | 前置 |
 |---|---|---|
 | M1 | 最小 IDT + panic 处理器 + 内核串口日志设施 —— **已完成** | M0 |
-| M2 | **接口已定义：** [memory_subsystem_CN.md](memory_subsystem_CN.md) —— 内核页表 + 物理页帧分配器（基于 M0 传入的内存图，`LOADER_DATA` 视为已占用）+ 内核堆；拆为 M2a/M2b 交付 | M1 |
+| M2 | [memory_subsystem_CN.md](memory_subsystem_CN.md) —— 内核页表 + 物理页帧分配器（`LOADER_DATA` 视为已占用）+ 内核堆 —— **已完成**（M2a 见 PR #16，M2b 见 PR #17） | M1 |
 | M3 | 单核内核线程/调度骨架 | M2 |
 | M4 | 第一个用户态服务（最小特权级切换，暂不定义 IPC 语义） | M3 |
 | M5 | IPC 消息格式 + 能力令牌语义（**此时才谈**，需要真实用户态进程作为约束） | M4 |

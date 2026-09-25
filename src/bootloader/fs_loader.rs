@@ -21,9 +21,10 @@ const KERNEL_PATH: &CStr16 = cstr16!("\\EFI\\PARANUKO\\KERNEL.ELF");
 /// 一次装载最多覆盖的独立页数。
 ///
 /// M0 的内核只有几页；M2 起内核镜像里多了两块静态 `.bss`（页表竞技场 28 KiB、
-/// M2b 的页帧位图 128 KiB），因此上限放宽到 512 KiB。这个上限的作用是防止在栈上
-/// 放不下的 `allocated` 数组，而不是限制内核功能；真正的镜像大小由链接脚本决定。
-const MAX_KERNEL_PAGES: usize = 128;
+/// M2b 的页帧位图 256 KiB），加上 `alloc` 与格式化代码，镜像已接近 110 页，
+/// 因此上限放宽到 1 MiB。这个上限的作用是防止在栈上放不下的 `allocated` 数组，
+/// 而不是限制内核功能；真正的镜像大小由链接脚本决定。
+const MAX_KERNEL_PAGES: usize = 256;
 
 /// 载入成功的内核信息。
 #[derive(Debug)]

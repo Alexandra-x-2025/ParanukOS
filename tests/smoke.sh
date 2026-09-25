@@ -7,7 +7,7 @@
 #
 #   33  引导器装载完成（M0 起正常路径不再使用：成功会直接跳入内核）
 #   35  内核镜像装载失败（缺少镜像 / 非 ELF / 段布局非法 / 入口不可执行）
-#   37  内核自检通过（BootInfo 有效 + 内存图可用 + RSDP 存在 + 自建页表已安装）
+#   37  内核自检通过（BootInfo 有效 + 内存图可用 + RSDP 存在 + 自建页表 + 页帧分配器 + 内核堆）
 #   39  内核自检失败（magic/version 不匹配等）
 #   41  内核发生未处理异常或 panic（意外崩溃）
 #   43  内核内存初始化失败（页表构建/安装、页帧分配器、内核堆）
@@ -174,6 +174,27 @@ else
 fi
 grep_log "$LOG_DIR/m0-positive.log" '切换 CR3 后 BootInfo 仍可读' \
     "恒等映射确实覆盖了交接结构（切换 CR3 后可重新校验 BootInfo）"
+# --- M2b：页帧分配器与内核堆（memory_subsystem.md §8.4） ---
+if grep -qE 'frames: 管理 [0-9]+ 帧（[0-9]+ MiB），堆取走后空闲 [1-9][0-9]* 帧' "$LOG_DIR/m0-positive.log"; then
+    ok "页帧分配器初始化且仍有空闲页帧"
+else
+    bad "页帧统计行缺失或空闲页帧为 0"
+    show_log "$LOG_DIR/m0-positive.log"
+fi
+if grep -qE 'heap: 0x[0-9A-F]+\.\.0x[0-9A-F]+（1024 KiB，占用 256 个连续页帧）' "$LOG_DIR/m0-positive.log"; then
+    ok "内核堆取自 256 个连续页帧（1 MiB）"
+else
+    bad "堆区间日志不符（应当恰好 256 个连续页帧）"
+    show_log "$LOG_DIR/m0-positive.log"
+fi
+# 自检结束时堆必须回到"单个空闲块"，且字节数恰好是堆大小减去一个块头（24 字节）。
+if grep -qE 'heap: 自检 OK（全部释放后空闲 1048552 字节 / 1 个块）' "$LOG_DIR/m0-positive.log"; then
+    ok "内核堆自检通过：写读回、不重叠、全部合并回单块"
+else
+    bad "堆自检未回到单个空闲块（可能有泄漏或未合并）"
+    show_log "$LOG_DIR/m0-positive.log"
+fi
+
 # 映射规模必须覆盖测试虚拟机的主要内存（QEMU 默认 128 MiB，这里放宽到 64 MiB）
 mapped_mib="$(sed -n 's/.*个 2 MiB 大块（\([0-9]*\) MiB.*/\1/p' "$LOG_DIR/m0-positive.log" | head -1)"
 if [ -n "$mapped_mib" ] && [ "$mapped_mib" -ge 64 ]; then
@@ -235,6 +256,20 @@ grep_log "$LOG_DIR/m2a-null-deref.log" 'cr2=0x0 ' "CR2 指出出错地址正是�
 
 # 只在注入版里出现的提示，用来确认我们确实走到了那条路径，而不是别的原因导致的 #PF
 grep_log "$LOG_DIR/m2a-null-deref.log" '\[inject\] 故意读取未映射的页 0' "命中注入路径"
+
+# --- G. 故障注入：页帧分配器重复发出同一个页帧 → 内存自检以 43 退出（M2b） ---
+#
+# "两次分配返回了同一个页帧"是页帧分配器最危险的 bug 类型：两个使用者会拿到同一块内存。
+echo "==> 附加用例：页帧重复分配（故障注入）"
+if ! cargo build -p kernel --target "$BARE_TARGET" --features inject-memory-fault; then
+    echo "[-] 注入页帧重复分配的内核构建失败。" >&2
+    exit 1
+fi
+cp "target/${BARE_TARGET}/debug/kernel" "$WORK/KERNEL-double.ELF"
+boot_case "$WORK/loader.efi" "$WORK/KERNEL-double.ELF" "$LOG_DIR/m2b-double-alloc.log" "$EXIT_KERNEL_MEMORY_FAILURE" \
+    "页帧重复分配：内存自检发现并以 43 退出"
+grep_log "$LOG_DIR/m2b-double-alloc.log" 'memory self-check FAILED' "打印了自检失败"
+grep_log "$LOG_DIR/m2b-double-alloc.log" '两次分配返回了同一个页帧' "失败原因指明是重复分配"
 
 echo
 echo "结果: ${pass} 项通过, ${fail} 项失败"

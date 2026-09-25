@@ -94,7 +94,13 @@ ESP 的 `\EFI\PARANUKO\KERNEL.ELF` 处查找内核镜像，校验它是 ELF64 / 
 运行期内核先安装自己的 IDT，然后依据 `BootInfo` 里的 UEFI 内存图**自建四级恒等映射页表**并写入
 `CR3`：前 2 MiB 用 4 KiB 页、其余用 2 MiB 大块，且只映射与 RAM 区域相交的地址。非 RAM 区域与
 页 0 都刻意保持 not present，因此越界访问或空指针解引用会大声故障（`#PF`），而不是悄悄写到固件
-内存或设备上。接口定义见 [docs/architecture/memory_subsystem_CN.md](docs/architecture/memory_subsystem_CN.md)。
+内存或设备上。
+
+在这层映射之上，内核还跑着一个**位图式物理页帧分配器**（只发放 `EfiConventionalMemory`，用两张
+位图，因此 `free` 能拒绝从未属于它的页帧）与一个 **1 MiB 内核堆**——块头就存在堆内部的首次匹配
+空闲链表，接入 `#[global_allocator]`，于是 `Box`、`Vec` 等在内核里可用。两者都由启动时的自检背书：
+向 64 个块的每一个字节写入并读回、释放一半后重新分配、断言重复释放被拒绝、断言堆最终合并回单个
+空闲块。接口定义见 [docs/architecture/memory_subsystem_CN.md](docs/architecture/memory_subsystem_CN.md)。
 
 ### 测试
 
@@ -106,14 +112,17 @@ bash tests/smoke.sh                                                       # QEMU
 冒烟测试断言的是**精确的 QEMU 退出码**，而不是"打印了点什么"：内核自检通过为 37，装载失败为
 35，`BootInfo` 契约损坏为 39，内存初始化失败为 43，内核崩溃为 41。此外还会在串口日志里核对证据
 （恒等映射规模、切换 `CR3` 后 `BootInfo` 仍可读、故意不映射的页 0 触发 `#PF` 并报告向量 14 与
-`cr2=0x0`）。
+`cr2=0x0`、页帧计数、以及堆回到单个空闲块）。共 35 条断言，必须全部通过。
 
 ### 已知限制
 
-*   **目前只到 Milestone 0–2a。** 引导器会装载内核、调用 `exit_boot_services` 并跳转到入口；
-    内核随后校验 `BootInfo`、安装自己的 IDT 与页表、在 COM1 打印摘要并退出。**尚无内核堆、
-    用户态、IPC 与调度** —— 顺序见 `docs/architecture/kernel_interface.md` §9，M2b 会补上物理
-    页帧分配器与内核堆。
+*   **目前只到 Milestone 0–2。** 引导器会装载内核、调用 `exit_boot_services` 并跳转到入口；
+    内核随后校验 `BootInfo`、安装自己的 IDT 与页表、拉起页帧分配器与内核堆、在 COM1 打印摘要并
+    退出。**尚无用户态、IPC 与调度** —— 顺序见 `docs/architecture/kernel_interface.md` §9。
+*   内核堆**固定 1 MiB 且不增长**；用尽时 panic（退出码 41），而不是扩展堆。增长需要在分配器下面
+    挂区间链表，那本身就是一个独立设计。
+*   只发放 `EfiConventionalMemory`。在默认 128 MiB 的 QEMU 机器上，这在 127 MiB 的受管理区间里
+    约合 78 MiB；Boot Services / Runtime Services / ACPI 内存刻意留待"复用前先测量"。
 *   只接受 `ET_EXEC` 内核镜像；PIE（`ET_DYN`）内核需要重定位处理，目前未实现。
 *   内核虽然建立了映射，但还没有按需分页、W^X 与按进程隔离的地址空间；并且**刻意不映射
     MMIO**：串口走端口 I/O，目前不触碰任何 MMIO 设备。

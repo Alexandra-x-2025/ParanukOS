@@ -12,6 +12,9 @@
 #![no_main]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+extern crate alloc;
+
+mod heap;
 mod idt;
 mod logging;
 mod memory;
@@ -141,6 +144,42 @@ pub extern "C" fn kernel_main(boot_info: &BootInfo) -> ! {
         kerror!("地址 0 可读：内核页表未按策略生效（页 0 本应 not present）");
         finish(EXIT_VALUE_KERNEL_MEMORY_FAILURE);
     }
+
+    // 6. 页帧分配器与内核堆（M2b）。
+    //    从这一步起内核有了真正能用的动态内存：Box / Vec / String 都可用。
+    // SAFETY: 单核、中断已关闭；页表已安装，且本函数只调用一次。
+    let layout = match unsafe { memory::init_allocators(boot_info, tables.limit) } {
+        Ok(layout) => layout,
+        Err(err) => {
+            kerror!("memory init FAILED: {err}");
+            finish(EXIT_VALUE_KERNEL_MEMORY_FAILURE);
+        }
+    };
+    kinfo!(
+        "frames: 管理 {} 帧（{} MiB），堆取走后空闲 {} 帧",
+        layout.frames.managed,
+        layout.frames.managed * 4096 / (1024 * 1024),
+        layout.frames.free
+    );
+    kinfo!(
+        "heap: 0x{:X}..0x{:X}（{} KiB，占用 {} 个连续页帧）",
+        layout.heap.0,
+        layout.heap.0 + layout.heap.1 as u64,
+        layout.heap.1 / 1024,
+        layout.heap.1 / 4096
+    );
+
+    // 7. 内存自检：写读回、不重叠、可合并、页帧计数（memory_subsystem.md §6.4）。
+    if let Err(err) = memory::self_check(boot_info) {
+        kerror!("memory self-check FAILED: {err}");
+        finish(EXIT_VALUE_KERNEL_MEMORY_FAILURE);
+    }
+    let heap_stats = heap::stats();
+    kinfo!(
+        "heap: 自检 OK（全部释放后空闲 {} 字节 / {} 个块）",
+        heap_stats.free_bytes,
+        heap_stats.free_blocks
+    );
 
     kinfo!("self-check OK");
 

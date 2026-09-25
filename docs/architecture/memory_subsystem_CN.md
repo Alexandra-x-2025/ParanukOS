@@ -161,17 +161,21 @@ pub enum MapError { Empty, StrideTooSmall(u32), AddressOverflow { index: usize }
 ### 5.1 状态
 
 ```rust
-pub struct FrameAllocator { /* 静态位图 + 管理区间 + 计数 */ }
+pub struct FrameAllocator<'a> { /* 两张位图 + 管理区间 + 保留区间 + 计数 */ }
 ```
 
-* 位图是 `.bss` 中的 `static` 数组，**每帧 1 bit，`1 = 已占用`**；
-* 当 `MAX_IDENTITY_BYTES = 4 GiB` 时其大小为 `4 GiB / 4 KiB / 8 = 128 KiB`；
+* 两张 `.bss` 中的 `static` 位图，**各每帧 1 bit**：`allocatable`（`1 = 这一帧可被发放`）
+  与 `used`（`1 = 当前已发放`）；
+* 之所以分成两张：`free` 必须能区分"从未属于分配器的页帧"（固件保留区、MMIO、非 conventional
+  内存）与"本来就是空闲的页帧"。只有一张位图时两者都是 `1`，`free` 就会把绝不能发放的内存放回
+  空闲池；
+* 当 `MAX_IDENTITY_BYTES = 4 GiB` 时两张共 `2 × 4 GiB / 4 KiB / 8 = 256 KiB`；
 * 第 *i* 位描述页帧 `managed_start + i * 4096`。
 
 ### 5.2 哪些页帧是空闲的
 
-`init(bitmap, &map, reserved: &[Range<u64>], config)` 先把所有页帧标为**已占用**，只有同时满足
-以下条件的页帧才会被清位：
+`init(bitmap, &map, reserved, config)` 先把所有页帧标为"不可发放"（`allocatable = 0`）且
+"已占用"（`used = 1`），只有同时满足以下条件的页帧才会被标为空闲且可发放：
 
 1. 该页帧完整落在某个 `EfiConventionalMemory` 区域内——M2 **只**发放 conventional 内存
    ［决策 #15］，尽管 `kernel_interface_CN.md` §6.2 说 Boot Services 内存在交接后已归空闲。
@@ -185,7 +189,12 @@ pub struct FrameAllocator { /* 静态位图 + 管理区间 + 计数 */ }
 
 第 4 条与第 1 条在信息上是冗余的——上述区间都会被报告为 `EfiLoaderData`——但**刻意保留**：
 分配器不应依赖固件是否正确分类了我们自己的分配。自检会断言没有任何空闲页帧与保留区间相交，
-而这正是此处出 bug 时会破坏的不变量（也正是 `inject-memory-fault` 拿掉的那一条，§7.2）。
+而这正是此处出 bug 时会破坏的不变量。自检会交叉校验**两份**清单：分配器自己记录的那份，以及
+内核按 `BootInfo` 独立算出的那份（内核镜像、栈、`BootInfo` 页、内存图缓冲、页表竞技场、页帧位图）。
+
+规则 1 的实测代价（QEMU 8.2 + OVMF，默认 128 MiB）：受管理区间是 127 MiB（32512 帧），但其中只有
+约 78 MiB（20027 帧）是 `EfiConventionalMemory`；其余是 `BootServices*` / `RuntimeServices*` / ACPI
+内存，M2 刻意尚未复用。
 
 ### 5.3 API 契约
 
@@ -194,17 +203,21 @@ pub fn init(bitmap: &mut [u8], map: &MemoryMap, reserved: &[Range<u64>], cfg: Co
     -> Result<Self, InitError>;                       // InitError::BitmapTooSmall
 pub fn alloc(&mut self) -> Option<PhysFrame>;         // 最低的空闲页帧
 pub fn alloc_contiguous(&mut self, count: usize) -> Option<PhysRange>;
-pub fn free(&mut self, frame: PhysFrame) -> Result<(), FreeError>; // AlreadyFree | NotManaged
+pub fn free(&mut self, frame: PhysFrame) -> Result<(), FreeError>;
+                                                      // AlreadyFree | NotManaged | Reserved
 pub fn stats(&self) -> FrameStats;                    // managed / free
-pub fn is_free(&self, frame: PhysFrame) -> bool;
+pub fn reserved_ranges(&self) -> &[ReservedRange];
+pub fn first_free_in(&self, start: u64, end: u64) -> Option<PhysFrame>;
 ```
 
 * **最低地址优先**：确定性，使宿主测试与 QEMU 自检都能做精确断言。ASLR 与抗碎片策略明确不在
   M2 范围内［决策 #17］；
 * `alloc_contiguous` 存在的原因是堆是一段连续字节区间（§6.1）；它首次匹配 `count` 个连续空闲
   位，找不到就报告「没有足够连续内存」，而不是返回一段碎片；
-* `free` 区分 `NotManaged`（不在位图内）与 `AlreadyFree`（重复释放），使自检可以断言两种情况。
-  M2 中 `free` **没有生产调用者**（堆不会收缩）；它为自检和 M3 存在，并由宿主测试覆盖；
+* `free` 区分 `NotManaged`（不在受管理区间内，或从未可发放）、`Reserved`（落在显式保留区间内）与
+  `AlreadyFree`（重复释放），使自检可以断言三种情况。M2 中 `free` **没有生产调用者**（堆不会收缩）；
+  它为自检和 M3 存在，并由宿主测试覆盖；
+* `reserved_ranges` 与 `first_free_in` 供自检做交叉校验；它们只读，不会扰动空闲集合；
 * 页帧 0 永不被管理（低于 `MIN_FREE_ADDR`），因此 `alloc` 绝不会返回它。
 
 ### 5.4 并发
@@ -227,11 +240,16 @@ pub fn is_free(&self, frame: PhysFrame) -> bool;
 `crates/kernel-memory/src/heap.rs`，作用于调用方提供的 `&mut [u8]` 竞技场，因此整个算法都能在
 宿主平台单测：
 
-* 每个空闲块带块头（`size`、`next`）与最小块大小（32 字节）；
+* 每个块带 24 字节块头：`magic`（u32）、填充、`size`（块总大小）、`next`（下一个空闲块的偏移）。
+  magic 区分空闲块与已分配块，重复释放与陌生指针因此可以被拒绝；
+* `MIN_BLOCK = 最小负载(16) + 块头(24) = 40` 字节，是分配器**会单独切分**的最小块；请求留下的尾部
+  小于该值时会被一并吸收，因此**已分配块**可以小到只剩块头，而**空闲块**也可能暂时小于
+  `MIN_BLOCK`，直到邻居被释放并与它合并。两种情况都有宿主测试覆盖；
 * `alloc(layout)`：首次匹配；当剩余部分还能容纳一个块头加最小负载时切分该块；
 * `dealloc(ptr)`：把块按**地址序**放回链表，并与前后邻居**合并**；
-* 对齐：支持不超过 `PAGE_SIZE` 的 `layout.align()`，做法是多分配并在返回指针**之前**留出填充，
-  这样 `dealloc`——它只拿到指针，且拿到的 `Layout` 可能与 `alloc` 时不同——总能找回块头；
+* 块头**永远紧贴负载**：负载之前的填充要么为空，要么大到足以单独成为一个空闲块（很小的填充会被
+  抬到 `MIN_BLOCK`）。这正是 `dealloc` 只凭指针就能找回头部的原因，也让它不依赖分配时的 `Layout`；
+* 对齐：支持不超过 `PAGE_SIZE` 的 `layout.align()`；返回的负载同时满足请求的对齐与块头的 8 字节对齐；
 * 按 `GlobalAlloc` 契约拒绝 `Layout.size == 0` 与不支持的对齐；
 * 失败返回空指针；`alloc::alloc::handle_alloc_error`（Rust 1.68 起稳定的默认处理器）以
   "memory allocation of N bytes failed" panic，再由 M1 的 panic 处理器变成退出码 41——**无需任何
@@ -250,21 +268,24 @@ static KERNEL_HEAP: KernelHeap = KernelHeap::new();   // GlobalAlloc → heap::F
 **单个**空闲块（§6.4 第 5 步）。
 
 ### 6.4 自检（证明 M2 真正工作的部分）
-在 `kernel_main` 末尾、`self-check OK` 之前运行：
+在 `kernel_main` 末尾、`self-check OK` 之前运行；失败时打印步骤号、被破坏的不变量与相关地址：
 
-1. 分配 `N = 64` 个大小各异的块（16、33、64、129、256、1025 字节……），向每个块的**每一个字节**
-   写入由块序号派生的图案；
-2. 断言所有块两两不相交、都在堆区间内，且同样大小的块拿到了不同地址——每一条都是真检查，不是
-   恒真式；
+1. 分配 `N = 64` 个大小各异的块（16、33、64、129、256、1025、4096、7 字节），向每个块的
+   **每一个字节**写入由块序号派生的图案；
+2. 断言所有块两两不相交、都在堆区间内——每一条都是真检查，不是恒真式；
 3. 逐字节读回比对：这证明页帧真的被映射且可写，而不仅仅是分配器的算术正确；
 4. 释放其中一半，再分配 `N/2` 个同样大小的替换块，验证替换块与仍存活的块不相交（按地址集合
    判不相交，而不是假设某个地址），并且原有存活块内容未被破坏；
-5. 全部释放，断言堆回到恰好**一个**空闲块，其大小等于整个堆减去一个块头——即合并生效；
-6. 断言 `FrameAllocator::stats().free` 相比初始化前恰好减少了 `HEAP_SIZE / 4096`，且没有任何空闲
-   页帧与保留区间相交（§5.2 第 4 条）；
+5. 全部释放，断言堆回到恰好**一个**空闲块，其大小等于整个堆减去一个块头（1 MiB − 24 =
+   1048552 字节）——即合并生效——并断言两次"申请两倍堆大小"的请求都干净地失败（返回空，不回绕、
+   不 panic）；
+6. 页帧分配器检查：两次分配必须是**不同页帧**（唯一能抓住"重复分配"的检查）；释放后重新分配必须
+   拿回同一个最低页帧；重复释放必须被拒绝；保留区间内不得有空闲页帧——既对照分配器自己记录的清单，
+   也对照内核按 `BootInfo` 独立算出的清单；且 `FrameAllocator::stats().free` 相比取堆之前恰好减少
+   `HEAP_SIZE / 4096 = 256`；
 7. 打印 `heap: 0x…..0x… (1 MiB), 自检 OK`。
 
-任何一步失败都会打印具体原因并以 **43** 退出。
+任何一步失败都会打印步骤、不变量与地址，并以 **43** 退出。
 
 ## 7. 退出码与故障注入
 
@@ -280,8 +301,10 @@ static KERNEL_HEAP: KernelHeap = KernelHeap::new();   // GlobalAlloc → heap::F
 ### 7.2 故障注入（仅测试）
 两个特性，均带有长期声明「生产构建绝不启用」：
 
-* `inject-memory-fault`（新增）：构造页帧分配器保留区间时**去掉**内核镜像那一段，于是 §6.4 第 6 步
-  的交叉检查必然失败 → **43**。它覆盖了「分配器不得发放内核已占用的内存」这条检测路径；
+* `inject-memory-fault`（新增）：页帧分配器发放页帧时**不把它标记为已占用**（crate 特性
+  `inject-double-alloc`，由内核同名特性转发），于是 §6.4 第 6 步「两次分配必须是不同页帧」的检查
+  必然失败 → **43**。这个故障值得注入：两个调用方悄悄拿到同一块内存是页帧分配器最危险的 bug，
+  而且在有人被覆写之前完全看不出来；
 * `inject-null-deref`（新增）：页表安装完成后，故意读取地址 `0`——按策略未被映射（§3.4）→ `#PF`
   （向量 14）→ M1 的异常处理器 → **41**。这是唯一能证明生效的是**内核的**页表而不是固件的页表的测试。
 
@@ -297,9 +320,9 @@ static KERNEL_HEAP: KernelHeap = KernelHeap::new();   // GlobalAlloc → heap::F
 | **M2a** | `crates/kernel-memory` 中的 `map.rs` + `paging.rs`（纯逻辑、宿主单测）；内核构建并安装自己的页表，切换后重新校验 `BootInfo`；退出码 43；引导器提高 `MAX_KERNEL_PAGES` | 页表 bug 与堆 bug 的诊断方式完全不同；拆开让每个 PR 的失败面更小 |
 | **M2b** | `frame.rs` + `heap.rs`（宿主单测）；`#[global_allocator]`；§6.4 自检；两个注入特性；新的冒烟用例 | 建立在 M2a 已经证明过的映射之上 |
 
-`MAX_KERNEL_PAGES` 必须在 M2a 提高：页表竞技场（28 KiB）加上 M2b 的 128 KiB 页帧位图，会让镜像
-远超当前 64 页（256 KiB）的预算。忘了这件事的表现是引导器报 `TooManyPages`（退出码 35）——正是
-M2a 关于镜像区间的那条验收标准在防的问题。
+`MAX_KERNEL_PAGES` 提高了两次：M2a 的 64 → 128 页（页表竞技场 28 KiB），M2b 的 128 → 256 页
+（1 MiB，两张页帧位图 256 KiB，加上 `alloc` 与格式化代码后镜像已达 104 页）。忘了这件事的表现是
+引导器报 `TooManyPages`（退出码 35）——正是关于镜像区间的那条验收标准在防的问题。
 
 ### 8.2 交付物
 
@@ -314,22 +337,30 @@ M2a 关于镜像区间的那条验收标准在防的问题。
 | 7 | `tests/smoke.sh` | 新增 M2 用例（§8.3 / §8.4） |
 | 8 | 文档 | 本文档、`kernel_interface_CN.md` §7.2 与 §9、`README_CN` / `VISION_CN` 的能力表——全部双语 |
 
-### 8.3 验收标准 —— M2a
-- [ ] 内核打印 `paging: 恒等映射 …`，映射大小 ≥ 64 MiB，且块粒度为 2 MiB；
-- [ ] 内核在安装页表之后重新校验 `BootInfo`（有对应日志行），即恒等映射确实覆盖交接结构；
-- [ ] `tests/smoke.sh` 正常用例仍断言 37，M1 的反例仍为 35 / 35 / 39 / 41；
-- [ ] `inject-null-deref` 退出 **41**，且日志指出向量 14（`#PF`）——直接证明生效的是内核页表而非固件页表；
-- [ ] `python3 tests/check_kernel_elf.py` 通过，并额外断言页对齐后的装载区间不超过 `MAX_KERNEL_PAGES`；
-- [ ] `cargo test -p kernel-memory` 通过（内存图 + 页表测试）。
+### 8.3 验收标准 —— M2a（**已满足**，PR #16）
+- [x] 内核打印 `paging: 恒等映射 …`，映射大小 ≥ 64 MiB，且块粒度为 2 MiB；
+- [x] 内核在安装页表之后重新校验 `BootInfo`（有对应日志行），即恒等映射确实覆盖交接结构；
+- [x] `tests/smoke.sh` 正常用例仍断言 37，M1 的反例仍为 35 / 35 / 39 / 41；
+- [x] `inject-null-deref` 退出 **41**，且日志指出向量 14（`#PF`）——直接证明生效的是内核页表而非固件页表；
+- [x] `python3 tests/check_kernel_elf.py` 通过，并额外断言页对齐后的装载区间不超过 `MAX_KERNEL_PAGES`；
+- [x] `cargo test -p kernel-memory` 通过（内存图 + 页表测试）。
 
-### 8.4 验收标准 —— M2b
-- [ ] 日志包含页帧计数且 `free > 0`，以及 1 MiB 堆区间的日志行；
-- [ ] 七步自检在真实 QEMU + OVMF 上全部通过，包括 64 个块的逐字节读回、重复释放检测与合并断言；
-- [ ] `inject-memory-fault` 退出 **43**，正常用例仍退出 **37**；
-- [ ] `inject-fault`（M1）仍退出 **41**，且此时运行在内核自己的页表下；
-- [ ] 初始化后空闲页帧数恰好减少 `HEAP_SIZE / 4096`；
-- [ ] `cargo test -p kernel-memory` 覆盖分配 / 释放 / 复用 / 合并 / 对齐 / 耗尽 / 重复释放；
-- [ ] 既有冒烟断言无回归，且 fmt/clippy 在 CI 已用的全部配置下保持干净。
+### 8.4 验收标准 —— M2b（**已满足**，PR #17）
+- [x] 日志包含页帧计数且 `free > 0`，以及 1 MiB 堆区间的日志行；
+- [x] 七步自检在真实 QEMU + OVMF 上全部通过，包括 64 个块的逐字节读回、重复释放检测与合并断言；
+- [x] `inject-memory-fault` 退出 **43**，正常用例仍退出 **37**；
+- [x] `inject-fault`（M1）仍退出 **41**，且此时运行在内核自己的页表下；
+- [x] 初始化后空闲页帧数恰好减少 `HEAP_SIZE / 4096`；
+- [x] `cargo test -p kernel-memory` 覆盖分配 / 释放 / 复用 / 合并 / 对齐 / 耗尽 / 重复释放；
+- [x] 既有冒烟断言无回归，且 fmt/clippy 在 CI 已用的全部配置下保持干净。
+
+在 QEMU 8.2.2 + OVMF（默认 128 MiB）上实测，35/35 条冒烟断言全绿：
+
+```
+frames: 管理 32512 帧（127 MiB），堆取走后空闲 20027 帧
+heap: 0x168000..0x268000（1024 KiB，占用 256 个连续页帧）
+heap: 自检 OK（全部释放后空闲 1048552 字节 / 1 个块）
+```
 
 ### 8.5 已知坑（按可能性排序）
 
@@ -359,6 +390,8 @@ M2a 关于镜像区间的那条验收标准在防的问题。
 | 19 | 内存初始化失败用新退出码 43 | 与 39 区分 | 内存子系统坏了与交接坏了，负责人和修法都不同 | 中（已发布的含义冻结） |
 | 20 | M2 不加锁 | 写成前置条件 | 单核、中断关闭；一把未经验证的锁比写明前置条件更糟 | 高 |
 | 21 | 空指针页永不映射 | 作为策略，无视固件的类型 | 让空指针解引用成为 `#PF`（→ 41），并给 M2a 一个证明页表确实生效的测试 | 高 |
+| 22 | 页帧用两张位图（`allocatable` + `used`）而不是一张 | 256 KiB 而不是 128 KiB | 只有一张位图时，`free` 无法区分"从未可发放"（MMIO、保留区）与"本来就空闲"，会把绝不能发放的内存放回空闲池 | 中 |
+| 23 | 43 的注入方式定为"同一个页帧发两次" | crate 特性 `inject-double-alloc` | 重复分配是页帧分配器最危险、也是自检最该抓住的 bug；改成"去掉保留区间"则根本不可观测 | 高 |
 
 ## 10. 接口变更流程
 1. `crates/kernel-memory` 的公开项是内核与其自身逻辑之间的接口；改动必须配套宿主测试。

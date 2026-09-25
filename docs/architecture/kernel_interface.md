@@ -2,7 +2,8 @@
 
 [English] | [中文](kernel_interface_CN.md)
 
-> **Status: interface v0 is settled. Implementation status: not implemented (M0 has not started).**
+> **Status: interface v0 is settled. Implementation status: M0, M1 and M2 are implemented and
+> verified on QEMU + OVMF.**
 >
 > This document defines **only the interface between the bootloader and the kernel**, plus the
 > first verifiable milestone. The microkernel itself (IPC, capability model, scheduling,
@@ -50,6 +51,8 @@ infrastructure.
 | Kernel IDT (32 CPU exceptions), exception/panic diagnostics, serial logging | `crates/kernel/src/idt.rs`, `logging.rs` |
 | Kernel-side UEFI memory-map parsing (40/48-byte stride, unknown types are not RAM) | `crates/kernel-memory/src/map.rs` (M2a) |
 | Kernel page tables: four-level identity map built from the memory map and installed via `CR3`; only RAM is mapped, page 0 never is | `crates/kernel/src/memory.rs`, `crates/kernel-memory/src/paging.rs` (M2a) |
+| Physical frame allocator (bitmap over `EfiConventionalMemory`, lowest-first, contiguous allocation, two bitmaps so `free` can reject frames it never owned) | `crates/kernel-memory/src/frame.rs` (M2b) |
+| Kernel heap (1 MiB, first-fit free list with in-arena headers, `#[global_allocator]`) | `crates/kernel-memory/src/heap.rs`, `crates/kernel/src/heap.rs` (M2b) |
 | Exact exit codes (33 success / 35 load failure / 43 memory init / 124 timeout → failure) | `--features qemu-exit` + `run-qemu.sh` |
 
 ### 2.2 Gaps (what M0 closes)
@@ -272,7 +275,7 @@ QEMU's `isa-debug-exit` exit code is `(value << 1) | 1`.
 | **37** | **Kernel self-check passed** (`BootInfo` valid, memory map usable, RSDP present) | **kernel** | implemented (M0) |
 | **39** | **Kernel self-check failed** — the kernel concluded it cannot run (magic/version mismatch, missing memory map, no RSDP) | **kernel** | implemented (M0) |
 | **41** | **Kernel fault or panic** — an unhandled CPU exception (`#UD`, `#GP`, `#PF`, …) or a `panic!` | **kernel** | implemented (M1) |
-| **43** | **Kernel memory initialisation failed** — page tables, frame allocator or heap; see [memory_subsystem.md](memory_subsystem.md) §7.1 | **kernel** | reserved (M2) |
+| **43** | **Kernel memory initialisation failed** — page tables, frame allocator or heap; see [memory_subsystem.md](memory_subsystem.md) §7.1 | **kernel** | implemented (M2) |
 | 124 | Timed out without exiting (treated as a hang) | — | implemented (fails) |
 
 **33 and 37 must stay distinct**: otherwise the test cannot tell "the bootloader loaded and stopped"
@@ -308,16 +311,16 @@ interrupt handling.
 | 4 | `run-qemu.sh` | Place both `BOOTX64.EFI` and `KERNEL.ELF` in the ESP |
 | 5 | `tests/smoke.sh` | New M0 case: assert exit code 37 and assert the kernel's self-check line appears |
 
-### 8.4 Acceptance criteria (each machine-checkable)
-- [ ] The ELF produced by `cargo build -p kernel` has `e_type=2`, `e_machine=62`, and `e_entry`
+### 8.4 Acceptance criteria (each machine-checkable) — **met**; the M0/M1/M2 smoke test still asserts them
+- [x] The ELF produced by `cargo build -p kernel` has `e_type=2`, `e_machine=62`, and `e_entry`
       inside an executable `PT_LOAD` segment;
-- [ ] the bootloader artifact is still PE32+ / subsystem=10;
-- [ ] the smoke test asserts exit code **37** (kernel self-check passed), **not** 33;
-- [ ] the serial log contains kernel output, with a memory-map entry count **> 0** and `rsdp != 0`
+- [x] the bootloader artifact is still PE32+ / subsystem=10;
+- [x] the smoke test asserts exit code **37** (kernel self-check passed), **not** 33;
+- [x] the serial log contains kernel output, with a memory-map entry count **> 0** and `rsdp != 0`
       (expected under QEMU+OVMF);
-- [ ] **negative case 1**: replacing `KERNEL.ELF` with a non-ELF file → exit code **35**;
-- [ ] **negative case 2**: injecting a wrong `BootInfo.magic` → kernel self-check fails, exit code **39**;
-- [ ] the existing 9 assertions do not regress.
+- [x] **negative case 1**: replacing `KERNEL.ELF` with a non-ELF file → exit code **35**;
+- [x] **negative case 2**: injecting a wrong `BootInfo.magic` → kernel self-check fails, exit code **39**;
+- [x] the existing 9 assertions do not regress.
 
 ### 8.5 Known pitfalls, most likely first
 
@@ -332,12 +335,12 @@ interrupt handling.
 | 7 | Wrong `isa-debug-exit` port | `-device isa-debug-exit,iobase=0xf4,iosize=0x04` + `exit_port=0xf4` |
 | 8 | Iterating the memory map with `sizeof` instead of `desc_size` | follow the warning in §5.3 |
 
-## 9. Later milestones (M3+ are placeholders, **not designed**)
+## 9. Milestones (M3+ are placeholders, **not designed**)
 
 | Milestone | Content | Requires |
 |---|---|---|
 | M1 | Minimal IDT + panic handler + kernel serial logging — **done** | M0 |
-| M2 | **Interface defined:** [memory_subsystem.md](memory_subsystem.md) — kernel page tables + physical frame allocator (driven by the memory map from M0, treating `LOADER_DATA` as in use) + kernel heap; delivered as M2a/M2b | M1 |
+| M2 | [memory_subsystem.md](memory_subsystem.md) — kernel page tables + physical frame allocator (treating `LOADER_DATA` as in use) + kernel heap — **done** (M2a in PR #16, M2b in PR #17) | M1 |
 | M3 | Single-core kernel thread/scheduling skeleton | M2 |
 | M4 | First user-space service (minimal privilege switch; no IPC semantics yet) | M3 |
 | M5 | IPC message format + capability token semantics (**only now**, and constrained by real user-space processes) | M4 |
