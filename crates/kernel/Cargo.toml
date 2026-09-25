@@ -22,3 +22,7 @@ inject-fault = []
 # 固件的恒等映射通常把页 0 也映射了，而内核按策略不映射它。
 # 生产构建绝不启用。
 inject-null-deref = []
+# 仅用于测试：让页帧分配器把同一个页帧发出去两次（转发到 kernel-memory 的
+# `inject-double-alloc`）。内存自检必须发现"两次分配返回了同一个页帧"并以退出码 43 结束。
+# 生产构建绝不启用。
+inject-memory-fault = ["kernel-memory/inject-double-alloc"]
