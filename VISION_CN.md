@@ -28,7 +28,7 @@ ParanukOS 的核心理念是 **“强隔离”**。我们相信系统的稳定�
 *   **明确排除在短期之外：只读 Ext4。** extent 树、日志、间接块与校验和使其成为以月计的工程量，而它在 bring-up 阶段几乎换不来什么；`docs/architecture/kernel_interface_CN.md` 中的任何里程碑都不依赖它。
 
 ### 🖥️ 硬件与启动
-*   **UEFI 引导器（不使用 GRUB）：** 基于 [uefi-rs](https://github.com/rust-osdev/uefi-rs) 0.39、以 `x86_64-unknown-uefi` 编译的 UEFI 应用。它会定位自己被加载时所在的 ESP 卷，校验内核镜像为 ELF64/x86-64 可执行文件，然后载入内存。整个引导路径中不使用 GRUB。
+*   **UEFI 引导器（不使用 GRUB）：** 基于 [uefi-rs](https://github.com/rust-osdev/uefi-rs) 0.39、以 `x86_64-unknown-uefi` 编译的 UEFI 应用。它会定位自己被加载时所在的 ESP 卷，校验内核镜像为 ELF64/x86-64 可执行文件，按链接地址分段装载，然后调用 `exit_boot_services` 并携带 `BootInfo` 把控制权交给内核入口。整个引导路径中不使用 GRUB。
 *   **Rust 原生开发:** 从底层开始使用 Rust 构建，消除内存安全漏洞。
 *   **接口规范:** 引导器与内核之间的契约（镜像格式与装载规则、入口 ABI、`BootInfo`、交接语义、退出码）定义在 [docs/architecture/kernel_interface_CN.md](docs/architecture/kernel_interface_CN.md)。
 

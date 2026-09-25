@@ -1,0 +1,11 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition = "2024"
+description = "ParanukOS 内核（Milestone 0：自检 + 串口输出）"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# 与引导器共用同一份 BootInfo 定义（避免两侧 repr(C) 漂移）
+boot-info = { path = "../boot-info" }

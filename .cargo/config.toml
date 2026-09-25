@@ -9,3 +9,12 @@ target = "x86_64-unknown-uefi"
 # cargo 会把编译产物路径作为第一个参数传入，因此脚本里不再需要写死路径。
 # 注意：请在仓库根目录执行 cargo run（runner 使用相对路径调用脚本）。
 runner = "./run-qemu.sh"
+
+[target.x86_64-unknown-none]
+# 内核必须链接为 ET_EXEC（非 PIE）：引导器不做重定位，只按 ELF 的 p_paddr 装载，
+# 并且接口文档 §3.3 明确规定拒绝 ET_DYN。默认产出是 PIE(ET_DYN)，所以必须显式关掉。
+rustflags = ["-C", "relocation-model=static"]
+
+[alias]
+# 构建内核：workspace 默认目标是引导器的 uefi，内核必须显式指定裸机目标
+kernel = "build -p kernel --target x86_64-unknown-none"

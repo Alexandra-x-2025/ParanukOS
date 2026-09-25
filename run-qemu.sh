@@ -10,6 +10,8 @@
 #   OVMF_CODE     指定 OVMF CODE 固件路径（覆盖自动探测）
 #   OVMF_VARS     指定 OVMF VARS 变量存储模板（默认与 CODE 同目录同名替换）
 #   ESP_DIR       虚拟盘目录（默认 ${TMPDIR:-/tmp}/paranukos_esp）
+#   KERNEL_ELF    内核镜像路径（默认 target/x86_64-unknown-none/debug/kernel）。
+#                 设为**空字符串**可禁止自动投放（冒烟测试的"缺少内核"用例依赖这一点）。
 #   ESP_EXTRA     目录，其内容会被一并复制进 ESP 根目录；
 #                 冒烟测试用它放入 \EFI\PARANUKO\KERNEL.ELF
 #   QEMU_DATA_DIR QEMU 数据目录（仅在非标准前缀安装时需要，传给 -L）
@@ -79,6 +81,21 @@ ESP_DIR="${ESP_DIR:-${TMPDIR:-/tmp}/paranukos_esp}"
 rm -rf "${ESP_DIR}"
 mkdir -p "${ESP_DIR}/EFI/BOOT"
 cp "${EFI_PATH}" "${ESP_DIR}/EFI/BOOT/BOOTX64.EFI"
+
+# 内核镜像：内核是独立 crate（裸机目标），由 `cargo kernel` 构建，产物不在 ESP 里。
+# 这里按接口文档 §3 的约定路径自动投放，使 `cargo kernel && cargo run` 能完整跑通。
+# 注意：使用 ${VAR-default}（无冒号），因此显式设为空字符串时可以禁用投放。
+KERNEL_ELF="${KERNEL_ELF-target/x86_64-unknown-none/debug/kernel}"
+if [ -n "${KERNEL_ELF}" ]; then
+    if [ -f "${KERNEL_ELF}" ]; then
+        mkdir -p "${ESP_DIR}/EFI/PARANUKO"
+        cp "${KERNEL_ELF}" "${ESP_DIR}/EFI/PARANUKO/KERNEL.ELF"
+        echo "[+] 内核镜像: ${KERNEL_ELF}"
+    else
+        echo "[!] 未找到内核镜像 (${KERNEL_ELF})；ESP 中不会有 KERNEL.ELF，引导器将以 35 退出"
+        echo "    先执行 cargo kernel，或设置 KERNEL_ELF=/path/to/kernel"
+    fi
+fi
 
 # 可选：把 ESP_EXTRA 目录内容合并进来（冒烟测试用于放置内核镜像）。
 if [ -n "${ESP_EXTRA:-}" ]; then

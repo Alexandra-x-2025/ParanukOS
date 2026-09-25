@@ -68,7 +68,7 @@ ELF64, little-endian (`ELFDATA2LSB`), `e_machine = EM_X86_64(62)`, `e_type = ET_
 2. Read the program header table (`e_phoff` / `e_phnum` / `e_phentsize`; `e_phentsize` must be ≥ 56);
 3. For every segment with `p_type == PT_LOAD`:
    1. require `p_memsz > 0` and `p_align` either a power of two or 0/1;
-   2. allocate `ceil(p_memsz / 4096)` pages with `AllocateType::Address(p_paddr)`;
+   2. allocate the **page-aligned range** covering the segment (one page at a time, with `AllocateType::Address(page)`): `start = p_paddr & !0xFFF`, `end = align_up(p_paddr + p_memsz)`. **`p_paddr` is not guaranteed to be page-aligned** (the linker only guarantees `p_vaddr ≡ p_offset (mod p_align)`), so allocating at `p_paddr` directly fails; pages already allocated for an earlier segment must be **reused** rather than allocated again;
    3. copy `p_filesz` bytes to `p_paddr`;
    4. zero the range `[p_paddr + p_filesz, p_paddr + p_memsz)` (BSS);
 4. Physical ranges of all loaded segments **must not overlap**, and must not cover the
@@ -90,6 +90,7 @@ overlapping segments / `p_filesz > p_memsz` / address allocation failure /
   cannot drift apart.
 * **Nothing is given up for the future.** Supporting a higher-half layout later is a smooth
   evolution: load at `p_paddr`, map at `p_vaddr`, enter at `p_vaddr`.
+* **Segments are allocated by page-aligned range, not at `p_paddr` directly.** A real kernel image has segments whose `p_paddr` is not page-aligned (the v0 kernel's `.data` segment lands at `0x104B38`), and segment tails routinely share a page with the next segment. Both cases are handled by allocating the page-aligned range and reusing pages that an earlier segment already owns.
 * **Accepting only `ET_EXEC` is a deliberate simplification.** PIE (`ET_DYN`) would require
   relocation processing (`R_X86_64_RELATIVE`), which M0 does not do. It is a trade-off, not an
   oversight.
@@ -137,7 +138,7 @@ that is unit-tested on the host.
 pub struct BootInfo {
     pub magic: u64,          // 0x5061_7261_6E75_6B01 ("Paranuk" + interface version)
     pub version: u32,        // v0 = 0
-    pub size: u32,           // total size of this structure in bytes
+    pub size: u32,           // total size in bytes (v0 = 88; pinned by a unit test)
 
     pub mmap_ptr: u64,       // physical address of the EFI_MEMORY_DESCRIPTOR array
     pub mmap_len: u64,       // number of descriptors
@@ -181,7 +182,8 @@ The kernel **must not depend on uefi-rs**; it parses the array itself. On x86-64
 | 32 | `Attribute` | u64 | memory attribute bits |
 
 > ⚠️ Iterate using `mmap_desc_size`, **not** `sizeof::<MemoryDescriptor>()`: UEFI allows firmware
-> to return descriptors larger than the standard struct.
+> to return descriptors larger than the standard struct — OVMF under QEMU 8.2 actually reports
+> `desc_size = 48`, so iterating with the standard 40 bytes would mis-parse every entry.
 
 ### 5.4 Where `BootInfo` itself lives
 The bootloader allocates **one page** (`MemoryType::LOADER_DATA`), writes `BootInfo` at the start of
@@ -206,13 +208,19 @@ it, and puts that page's **physical address** in `rdi`. This way:
 2. allocate the kernel stack (`LOADER_DATA`, 64 KiB);
 3. collect the memory map (`boot::memory_map`) and keep its buffer alive;
 4. read the RSDP (`system::with_config_table`);
-5. allocate one page and write `BootInfo` into it;
+5. allocate one page for `BootInfo` (do not fill it in yet);
 6. **print the last line** (the firmware console is unusable from here on);
-7. `unsafe { boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) }`;
-8. `cli`;
-9. set `rsp = stack_top - 8` (satisfying §4.1);
-10. `rdi = physical address of BootInfo`;
-11. `jmp e_entry`.
+7. `unsafe { boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) }` — its **return value is the authoritative memory map** (its map key is the one used to exit);
+8. fill in `BootInfo`, including the memory-map pointer / len / desc_size / desc_ver taken from that returned map — pure memory writes, still safe after the exit;
+9. `cli`;
+10. set `rsp = stack_top - 8` (satisfying §4.1);
+11. `rdi = physical address of BootInfo`;
+12. `jmp e_entry`.
+
+> The memory map comes from the **return value of `exit_boot_services`**, not from an earlier
+> `memory_map()` call: allocating the kernel stack and the `BootInfo` page invalidates any earlier
+> map key, so only the map returned by the exit call is authoritative. Filling `BootInfo` after the
+> exit is safe because it involves no boot service.
 
 ### 6.2 What stops working after handoff
 
@@ -249,7 +257,7 @@ QEMU's `isa-debug-exit` exit code is `(value << 1) | 1`.
 | Code | Meaning | Reported by | Status |
 |---|---|---|---|
 | 0 | Human quit (`Ctrl+A` then `X`), or firmware finished normally | — | implemented |
-| **33** | Bootloader finished loading | bootloader | implemented (`--features qemu-exit`) |
+| **33** | Bootloader finished loading — **reserved since M0**: on success the bootloader jumps into the kernel and the *kernel* reports 37 | bootloader | reserved |
 | **35** | Kernel image load failure | bootloader | implemented (same) |
 | **37** | **Kernel self-check passed** (`BootInfo` valid, serial usable) | **kernel** | **pending in M0** |
 | **39** | **Kernel self-check failed** (magic/version mismatch, …) | **kernel** | **pending in M0** |
@@ -283,7 +291,7 @@ interrupt handling.
 | # | Deliverable | Notes |
 |---|---|---|
 | 1 | `crates/boot-info` | `BootInfo` v0 + `validate()` + host unit tests (zero dependencies) |
-| 2 | `crates/kernel` | `#![no_std]`, `x86_64-unknown-none`, fixed link address (tentatively `0x100000`), single `PT_LOAD`; entry validates `BootInfo` → serial output → writes `exit_port` |
+| 2 | `crates/kernel` | `#![no_std]`, `x86_64-unknown-none`, fixed link address (tentatively `0x100000`), one or more `PT_LOAD` segments (the bootloader must support multiple); entry validates `BootInfo` → serial output → writes `exit_port` |
 | 3 | `src/bootloader/` | Program header parsing, loading at `p_paddr` + BSS zeroing, stack allocation, `BootInfo` write, `exit_boot_services`, jump |
 | 4 | `run-qemu.sh` | Place both `BOOTX64.EFI` and `KERNEL.ELF` in the ESP |
 | 5 | `tests/smoke.sh` | New M0 case: assert exit code 37 and assert the kernel's self-check line appears |

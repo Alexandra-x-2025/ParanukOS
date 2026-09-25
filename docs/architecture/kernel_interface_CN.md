@@ -66,7 +66,7 @@ ELF64、小端（`ELFDATA2LSB`）、`e_machine = EM_X86_64(62)`、`e_type = ET_E
 2. 读取 Program Header 表（`e_phoff` / `e_phnum` / `e_phentsize`，`e_phentsize` 必须 ≥ 56）；
 3. 对每个 `p_type == PT_LOAD` 的段：
    1. 要求 `p_memsz > 0`、`p_align` 为 2 的幂（或 0/1）；
-   2. 以 `AllocateType::Address(p_paddr)` 申请 `ceil(p_memsz / 4096)` 页；
+   2. 按**页对齐区间**申请覆盖该段的内存（逐页调用 `AllocateType::Address(page)`）：`start = p_paddr & !0xFFF`、`end = align_up(p_paddr + p_memsz)`。**`p_paddr` 不保证页对齐**（链接器只保证 `p_vaddr ≡ p_offset (mod p_align)`），直接用它申请会失败；被前一段申请过的页（某段尾部与下一段共享一页）必须**复用**而不是重复申请；
    3. 把 `p_filesz` 字节复制到 `p_paddr`；
    4. 把 `[p_paddr + p_filesz, p_paddr + p_memsz)` 清零（BSS）；
 4. 所有被装载段的物理区间**不得重叠**，且不得覆盖引导器自身、`BootInfo`、内核栈、内存图缓冲；
@@ -84,6 +84,7 @@ ELF 头非法 / 非 `ET_EXEC` / Program Header 表越界 / 段类型非法 / 段
   避免"引导器常量"与"内核链接脚本"两处漂移。
 * **不牺牲未来**：将来支持 higher-half 时契约演进为"按 `p_paddr` 装载、按 `p_vaddr` 映射、
   跳 `p_vaddr`"，属平滑演进。
+* **段是按页对齐区间申请的，而不是直接按 `p_paddr`。** 真实内核镜像里存在 `p_paddr` 未页对齐的段（v0 内核的 `.data` 段落在 `0x104B38`），而且段的尾部经常与下一段共享同一页。这两种情况都通过"申请页对齐区间 + 复用前一段已拥有的页"来处理。
 * **只接受 `ET_EXEC` 是有意简化**：PIE（`ET_DYN`）需要重定位处理（`R_X86_64_RELATIVE`），
   M0 不做。这是一个明确的取舍，不是遗漏。
 
@@ -127,7 +128,7 @@ pub extern "C" fn kernel_main(boot_info: &BootInfo) -> ! { /* ... */ }
 pub struct BootInfo {
     pub magic: u64,          // 0x5061_7261_6E75_6B01（"Paranuk" + 接口版本）
     pub version: u32,        // v0 = 0
-    pub size: u32,           // 本结构体总字节数
+    pub size: u32,           // 本结构体总字节数（v0 = 88，由单元测试钉住）
 
     pub mmap_ptr: u64,       // EFI_MEMORY_DESCRIPTOR 数组的物理地址
     pub mmap_len: u64,       // 描述符个数
@@ -168,7 +169,8 @@ pub struct BootInfo {
 | 32 | `Attribute` | u64 | 内存属性位 |
 
 > ⚠️ 必须以 `mmap_desc_size` 为步长遍历，**不能**用 `sizeof::<MemoryDescriptor>()`：
-> UEFI 规范允许固件返回比标准结构更大的描述符。
+> UEFI 规范允许固件返回比标准结构更大的描述符 —— QEMU 8.2 下的 OVMF 实际返回
+> `desc_size = 48`，若按标准的 40 字节遍历，每一条都会错位。
 
 ### 5.4 `BootInfo` 自身的存放
 引导器分配**一页**（`MemoryType::LOADER_DATA`），把 `BootInfo` 写入该页起始处，
@@ -191,13 +193,18 @@ pub struct BootInfo {
 2. 分配内核栈（`LOADER_DATA`，64 KiB）；
 3. 收集内存图（`boot::memory_map`）并保留其缓冲；
 4. 读取 RSDP（`system::with_config_table`）；
-5. 分配一页并写入 `BootInfo`；
+5. 分配一页用于 `BootInfo`（**先不填内容**）；
 6. **打印最后一行**（此后固件控制台不再可用）；
-7. `unsafe { boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) }`；
-8. `cli`；
-9. 设置 `rsp = stack_top - 8`（满足 §4.1）；
-10. `rdi = BootInfo 物理地址`；
-11. `jmp e_entry`。
+7. `unsafe { boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) }` —— 它的**返回值就是权威内存图**（其 map key 正是被用来退出的那个）；
+8. 填充 `BootInfo`，其中内存图的指针 / 条目数 / desc_size / desc_ver 取自上面返回的那份内存图 —— 纯内存写入，退出之后仍然安全；
+9. `cli`；
+10. 设置 `rsp = stack_top - 8`（满足 §4.1）；
+11. `rdi = BootInfo 物理地址`；
+12. `jmp e_entry`。
+
+> 内存图取自 **`exit_boot_services` 的返回值**，而不是更早的 `memory_map()` 调用：分配内核栈与
+> `BootInfo` 页会使更早取得的 map key 失效，因此只有退出调用返回的那份才是权威的。
+> 在退出之后填充 `BootInfo` 是安全的，因为它不涉及任何引导服务。
 
 ### 6.2 交接后不可用的资源
 
@@ -232,7 +239,7 @@ QEMU 的 `isa-debug-exit` 退出码 = `(value << 1) | 1`。
 | 退出码 | 含义 | 报告者 | 状态 |
 |---|---|---|---|
 | 0 | 人类退出（`Ctrl+A` 然后 `X`）或固件正常结束 | — | 已实现 |
-| **33** | 引导器装载完成 | 引导器 | 已实现（`--features qemu-exit`） |
+| **33** | 引导器装载完成 —— **M0 起保留**：成功路径会直接跳入内核，改由**内核**报告 37 | 引导器 | 保留 |
 | **35** | 内核镜像装载失败 | 引导器 | 已实现（同上） |
 | **37** | **内核自检通过**（`BootInfo` 有效 + 串口可用） | **内核** | **M0 待实现** |
 | **39** | **内核自检失败**（magic/version 不匹配等） | **内核** | **M0 待实现** |
@@ -263,7 +270,7 @@ QEMU 的 `isa-debug-exit` 退出码 = `(value << 1) | 1`。
 | # | 交付物 | 说明 |
 |---|---|---|
 | 1 | `crates/boot-info` | `BootInfo` v0 + `validate()` + 宿主单测（零依赖） |
-| 2 | `crates/kernel` | `#![no_std]`、`x86_64-unknown-none`、固定链接地址（暂定 `0x100000`）、单 `PT_LOAD`；入口校验 `BootInfo` → 串口输出 → 写 `exit_port` |
+| 2 | `crates/kernel` | `#![no_std]`、`x86_64-unknown-none`、固定链接地址（暂定 `0x100000`）、一个或多个 `PT_LOAD` 段（引导器必须支持多段）；入口校验 `BootInfo` → 串口输出 → 写 `exit_port` |
 | 3 | `src/bootloader/` | Program Header 解析、按 `p_paddr` 装载 + BSS 清零、栈分配、`BootInfo` 写入、`exit_boot_services`、跳转 |
 | 4 | `run-qemu.sh` | ESP 中同时放入 `BOOTX64.EFI` 与 `KERNEL.ELF` |
 | 5 | `tests/smoke.sh` | 新增 M0 用例：断言退出码 37 + 断言串口出现内核自检行 |

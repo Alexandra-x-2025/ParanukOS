@@ -65,10 +65,13 @@ cargo build --release  # 产物: target/x86_64-unknown-uefi/release/paranukos.ef
 ### 在 QEMU 中运行
 
 ```bash
-cargo run    # 等价于 ./run-qemu.sh target/x86_64-unknown-uefi/debug/paranukos.efi
+cargo kernel   # 构建内核（裸机目标）→ target/x86_64-unknown-none/debug/kernel
+cargo run      # 构建引导器、把内核放进 ESP、用 OVMF 启动
 ```
 
-启动脚本会建立符合规范的 ESP 目录树（`/EFI/BOOT/BOOTX64.EFI`），并用 OVMF 引导它。
+启动脚本会建立符合规范的 ESP 目录树（`/EFI/BOOT/BOOTX64.EFI`），把内核放到约定路径
+（`\EFI\PARANUKO\KERNEL.ELF`），然后用 OVMF 引导。内核打印完 `BootInfo` 摘要后，
+QEMU 要么以状态码退出（启用 `qemu-exit` 特性时），要么 CPU 停机。
 
 退出模拟器：**先按 `Ctrl + A`，再按 `X`**。请勿使用 `Ctrl + C`，否则会留下僵尸 QEMU 进程并霸占串口。
 
@@ -87,7 +90,7 @@ bash tests/smoke.sh                                                       # QEMU
 
 ### 已知限制
 
-*   引导器目前**尚未**调用 `exit_boot_services`，也尚未跳转到内核入口：校验并载入镜像后会停在自旋状态。因此"能引导"目前只断言到"镜像被读取、校验并载入内存"。
+*   **目前只到 Milestone 0。** 引导器会装载内核、调用 `exit_boot_services` 并跳转到入口；内核随后校验 `BootInfo`、在 COM1 打印摘要并停机。尚无分页、用户态、IPC 与调度 —— 顺序见 `docs/architecture/kernel_interface.md` §9。
 *   只接受 `ET_EXEC` 内核镜像；PIE（`ET_DYN`）内核需要重定位处理，目前未实现。
 
 ## 🗺️ 路线图

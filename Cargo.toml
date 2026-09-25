@@ -9,12 +9,15 @@ edition = "2024"
 # UEFI 二进制必须 `test = false`（原因见下方 [[bin]] 注释），
 # 因此单元测试由 `cargo test -p kernel-image --target x86_64-unknown-linux-gnu` 承担。
 resolver = "3"
-members = ["crates/kernel-image"]
+members = ["crates/boot-info", "crates/kernel", "crates/kernel-image"]
 [features]
 # 让引导器通过 QEMU 的 isa-debug-exit 设备报告结果（退出码 33=成功 / 35=加载失败），
 # 供自动化测试做精确断言。同时启用 uefi 的 qemu 特性：panic 也走同一机制，
 # 而不是先 stall 再尝试复位。
 qemu-exit = ["uefi/qemu"]
+# 仅用于测试：故意写入错误的 BootInfo.magic，以覆盖内核"自检失败"路径（退出码 39）。
+# 生产构建绝不启用。
+inject-bad-magic = []
 
 [dependencies]
 # 核心 UEFI 支持。显式关闭默认特性，按需开启：
@@ -32,8 +35,11 @@ uefi = { version = "0.39", default-features = false, features = [
 # 日志门面（Facade），由 uefi 的 logger 特性驱动
 log = "0.4"
 
-# 内核镜像（ELF64/x86-64）头部校验。零依赖，可针对宿主平台做单元测试。
+# 内核镜像（ELF64/x86-64）头部校验与段解析。零依赖，可针对宿主平台做单元测试。
 kernel-image = { path = "crates/kernel-image" }
+
+# 与内核共享的 BootInfo 与协议常量（避免两侧 repr(C) 漂移）
+boot-info = { path = "crates/boot-info" }
 
 [profile.dev]
 panic = "abort"
