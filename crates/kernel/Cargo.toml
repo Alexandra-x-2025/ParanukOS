@@ -2,7 +2,7 @@
 name = "kernel"
 version = "0.1.0"
 edition = "2024"
-description = "ParanukOS 内核（Milestone 0：自检 + 串口输出）"
+description = "ParanukOS 内核（Milestone 2：自建页表 + 自检 + 串口输出）"
 license = "MIT OR Apache-2.0"
 publish = false
 
@@ -10,7 +10,15 @@ publish = false
 # 与引导器共用同一份 BootInfo 定义（避免两侧 repr(C) 漂移）
 boot-info = { path = "../boot-info" }
 
+# 内存子系统：UEFI 内存图解析 + 恒等映射页表构建（纯逻辑，宿主平台有单元测试）
+kernel-memory = { path = "../kernel-memory" }
+
 [features]
 # 仅用于测试：自检通过后故意执行 `ud2`，以覆盖异常处理器路径（退出码 41）。
 # 生产构建绝不启用。
 inject-fault = []
+# 仅用于测试：安装页表后故意读取**未映射**的页 0，应当触发 #PF（退出码 41）。
+# 这是唯一能证明"生效的是内核自己的页表，而不是固件遗留的页表"的测试：
+# 固件的恒等映射通常把页 0 也映射了，而内核按策略不映射它。
+# 生产构建绝不启用。
+inject-null-deref = []

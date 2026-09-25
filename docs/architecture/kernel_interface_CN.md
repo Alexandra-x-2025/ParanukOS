@@ -46,7 +46,9 @@
 | 把镜像按页复制到内存（**任意地址**） | `boot::allocate_pages(AnyPages, …)` |
 | 端到端冒烟测试、PE 结构校验、单元测试、CI | `tests/`、`.github/workflows/ci.yml` |
 | 内核 IDT（32 个 CPU 异常）、异常/panic 诊断、串口日志 | `crates/kernel/src/idt.rs`、`logging.rs` |
-| 精确退出码（33 成功 / 35 装载失败 / 124 超时判失败） | `--features qemu-exit` + `run-qemu.sh` |
+| 内核侧解析 UEFI 内存图（40/48 字节步长、未知类型不算 RAM） | `crates/kernel-memory/src/map.rs`（M2a） |
+| 内核页表：由内存图构建、经 `CR3` 安装的四级恒等映射；只映射 RAM，页 0 永不映射 | `crates/kernel/src/memory.rs`、`crates/kernel-memory/src/paging.rs`（M2a） |
+| 精确退出码（33 成功 / 35 装载失败 / 43 内存初始化 / 124 超时判失败） | `--features qemu-exit` + `run-qemu.sh` |
 
 ### 2.2 缺口（M0 要补的）
 

@@ -29,10 +29,15 @@ name = "kernel"
 version = "0.1.0"
 dependencies = [
  "boot-info",
+ "kernel-memory",
 ]
 
 [[package]]
 name = "kernel-image"
+version = "0.1.0"
+
+[[package]]
+name = "kernel-memory"
 version = "0.1.0"
 
 [[package]]
