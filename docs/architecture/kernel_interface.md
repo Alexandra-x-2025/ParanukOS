@@ -47,6 +47,7 @@ infrastructure.
 | Validating the kernel image as ELF64 / little-endian / x86-64 / `ET_EXEC` and extracting the entry point | `crates/kernel-image` |
 | Copying the image into memory, page by page (**arbitrary address**) | `boot::allocate_pages(AnyPages, …)` |
 | End-to-end smoke test, PE structure check, unit tests, CI | `tests/`, `.github/workflows/ci.yml` |
+| Kernel IDT (32 CPU exceptions), exception/panic diagnostics, serial logging | `crates/kernel/src/idt.rs`, `logging.rs` |
 | Exact exit codes (33 success / 35 load failure / 124 timeout → failure) | `--features qemu-exit` + `run-qemu.sh` |
 
 ### 2.2 Gaps (what M0 closes)
@@ -211,8 +212,8 @@ it, and puts that page's **physical address** in `rdi`. This way:
 5. allocate one page for `BootInfo` (do not fill it in yet);
 6. **print the last line** (the firmware console is unusable from here on);
 7. `unsafe { boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) }` — its **return value is the authoritative memory map** (its map key is the one used to exit);
-8. fill in `BootInfo`, including the memory-map pointer / len / desc_size / desc_ver taken from that returned map — pure memory writes, still safe after the exit;
-9. `cli`;
+8. **disable interrupts (`cli`) immediately** — after the exit the firmware's interrupt vectors and handlers are no longer valid, so a leftover hardware interrupt would jump into a dead firmware ISR and can corrupt memory;
+9. fill in `BootInfo`, including the memory-map pointer / len / desc_size / desc_ver taken from that returned map — pure memory writes, still safe after the exit;
 10. set `rsp = stack_top - 8` (satisfying §4.1);
 11. `rdi = physical address of BootInfo`;
 12. `jmp e_entry`.
@@ -232,6 +233,13 @@ it, and puts that page's **physical address** in `rdi`. This way:
 | Runtime Services | ✅ Still available (`ResetSystem`, `GetTime`, variable services) |
 | Firmware GDT / IDT | ❌ No longer valid. Until the kernel installs its own IDT, any exception or interrupt can cause a triple-fault reset |
 | Page tables | ⚠️ Usually still an identity mapping, but **not guaranteed** |
+
+> ⚠️ **Observed during M1 development:** with the kernel grew and the timing shifted, `BootInfo`'s
+> first word was intermittently overwritten (4 bytes) before the kernel validated it. The window
+> between the exit call and `cli` is the prime suspect, which is why step 8 above disables
+> interrupts immediately. The corruption could not be reproduced deterministically, so this is a
+> hardening, not a proven fix; the kernel's `BootInfo` validation is what turns it into a clear
+> error (39) instead of silent misbehaviour.
 
 ### 6.3 Memory ownership after handoff
 The kernel's physical allocator **must treat `LOADER_DATA` as in use**. At minimum that covers: the
@@ -259,8 +267,9 @@ QEMU's `isa-debug-exit` exit code is `(value << 1) | 1`.
 | 0 | Human quit (`Ctrl+A` then `X`), or firmware finished normally | — | implemented |
 | **33** | Bootloader finished loading — **reserved since M0**: on success the bootloader jumps into the kernel and the *kernel* reports 37 | bootloader | reserved |
 | **35** | Kernel image load failure | bootloader | implemented (same) |
-| **37** | **Kernel self-check passed** (`BootInfo` valid, serial usable) | **kernel** | **pending in M0** |
-| **39** | **Kernel self-check failed** (magic/version mismatch, …) | **kernel** | **pending in M0** |
+| **37** | **Kernel self-check passed** (`BootInfo` valid, memory map usable, RSDP present) | **kernel** | implemented (M0) |
+| **39** | **Kernel self-check failed** — the kernel concluded it cannot run (magic/version mismatch, missing memory map, no RSDP) | **kernel** | implemented (M0) |
+| **41** | **Kernel fault or panic** — an unhandled CPU exception (`#UD`, `#GP`, `#PF`, …) or a `panic!` | **kernel** | implemented (M1) |
 | 124 | Timed out without exiting (treated as a hang) | — | implemented (fails) |
 
 **33 and 37 must stay distinct**: otherwise the test cannot tell "the bootloader loaded and stopped"
@@ -324,7 +333,7 @@ interrupt handling.
 
 | Milestone | Content | Requires |
 |---|---|---|
-| M1 | Minimal IDT + panic handler + kernel serial logging | M0 |
+| M1 | Minimal IDT + panic handler + kernel serial logging — **done** | M0 |
 | M2 | Physical frame allocator (driven by the memory map from M0, treating `LOADER_DATA` as in use) + kernel heap | M1 |
 | M3 | Single-core kernel thread/scheduling skeleton | M2 |
 | M4 | First user-space service (minimal privilege switch; no IPC semantics yet) | M3 |
