@@ -1,44 +1,44 @@
-# ParanukOS 项目愿景
+# ParanukOS Vision
 
-[English Version] | [中文版本](VISION_CN.md)
+[English] | [中文](VISION_CN.md)
 
-ParanukOS 是一个基于 Rust 开发的高可靠性微内核操作系统，旨在为现代硬件提供安全且稳定的计算基础。通过采用微内核架构和用户态服务模型，ParanukOS 致力于构建一个既能支持底层系统编程，又能承载高层 Web/Wasm 应用的稳固平台。
+ParanukOS is a high-reliability, Rust-based microkernel operating system that aims to provide a secure and stable computing foundation for modern hardware. Through a microkernel architecture and a user-space service model, ParanukOS strives to build a solid platform that supports both low-level systems programming and high-level Web/Wasm applications.
 
-## 🔗 参考项目
-本项目受到 [os.phil-opp.com](https://os.phil-opp.com/) 的架构启发并参考了其相关设计。
+## 🔗 Reference Project
+This project is inspired by, and references the architecture of, [os.phil-opp.com](https://os.phil-opp.com/).
 
-## 🌟 核心哲学
-ParanukOS 的核心理念是 **“强隔离”**。我们相信系统的稳定性源于对组件的最小化权限控制：
-*   **微内核架构：** 内核仅负责最基础的任务，如 IPC、内存管理和基本调度。
-*   **高可靠性：** 通过将所有驱动程序和文件系统移至用户态，确保单个服务的崩溃不会导致整个系统挂掉。
-*   **现代硬件聚焦：** 专门针对最近 10 代硬件进行优化。
-*   **Wasm 为核心的应用层：** 提供安全的沙箱环境，让用户能够通过 WebAssembly 运行软件。
+## 🌟 Core Philosophy
+ParanukOS is built on the principle of **Strict Isolation**. We believe system stability comes from granting components the minimum possible authority:
+*   **Microkernel architecture:** the kernel only handles the most fundamental tasks, such as IPC, memory management and basic scheduling.
+*   **High reliability:** by moving all drivers and file systems into user mode, a crash in a single service cannot take the whole system down.
+*   **Modern hardware focus:** optimized specifically for the last 10 generations of hardware.
+*   **Wasm-first application layer:** a secure sandbox that lets users run software through WebAssembly.
 
-## 🚀 关键特性
+## 🚀 Key Features
 
-### 🏗️ 微内核架构
-采用纯 Rust 实现的微内核，提供：
-*   **零拷贝 (Zero-copy) IPC:** 高性能的进程间通信机制。
-*   **基于能力的安全性 (Capability-based Security):** 对所有硬件资源进行精细化的权限管理。
-*   **多核支持 (SMP):** 原生支持多核心调度与同步。
+### 🏗️ Microkernel Architecture
+A microkernel implemented in pure Rust, providing:
+*   **Zero-copy IPC:** a high-performance inter-process communication mechanism.
+*   **Capability-based security:** fine-grained permission management for all hardware resources.
+*   **SMP support:** native multi-core scheduling and synchronization.
 
-### 💾 文件系统路线图
-*   **短期目标：** 提供极简的只读 Ext4/FAT32 兼容层，用于初始开发和 QEMU 测试。
-*   **长期押注：** 基于 TFS 设计理念，用纯 Rust 在用户态实现 **写时复制 (CoW)** 文件系统，实现物理级别的数据写入隔离。
+### 💾 File System Roadmap
+*   **Short term:** a minimal read-only Ext4/FAT32 compatibility layer for initial development and QEMU testing.
+*   **Long term:** a pure-Rust, user-space **copy-on-write (CoW)** file system based on the TFS design, giving physical-level isolation of data writes.
 
-### 🖥️ 硬件与启动
-*   **重构的 GRUB:** 使用 Rust 开发的定制化启动加载器，仅支持最近 10 代硬件，降低复杂度并提高安全性。
-*   **Rust 原生开发:** 从底层开始使用 Rust 构建，消除内存安全漏洞。
+### 🖥️ Hardware & Booting
+*   **UEFI bootloader (no GRUB):** a UEFI application built on [uefi-rs](https://github.com/rust-osdev/uefi-rs) 0.39 and compiled for `x86_64-unknown-uefi`. It locates the ESP it was started from, validates the kernel image as an ELF64/x86-64 executable and loads it into memory. GRUB is not used anywhere in the boot path.
+*   **Rust-native development:** built from the ground up in Rust, eliminating memory-safety vulnerabilities.
 
-### 🌐 应用环境
-*   **Web/Wasm 运行时:** 用户应用的主要运行环境，提供接近原生性能的沙箱化软件商店体验。
-*   **极简 POSIX 层:** 仅为驱动程序和基础系统服务提供必要的兼容性接口。
+### 🌐 Application Environment
+*   **Web/Wasm runtime:** the primary environment for user applications, offering a sandboxed "software store" experience with near-native performance.
+*   **Minimal POSIX layer:** only the compatibility surface required by drivers and base system services.
 
-## 🗺️ 路线图
-- [ ] **第一阶段：核心基础** (IPC、内存管理、能力模型)
-- [ ] **第二阶段：硬件抽象** (ACPI 解析、块设备驱动)
-- [ ] **第三阶段：系统服务** (网络协议栈、CoW 文件系统)
-- [ ] **第四阶段：应用运行时** (WASI 集成)
+## 🗺️ Roadmap
+- [ ] **Phase 1: Core foundation** (IPC, memory management, capability model)
+- [ ] **Phase 2: Hardware abstraction** (ACPI parsing, block device drivers)
+- [ ] **Phase 3: System services** (network stack, CoW file system)
+- [ ] **Phase 4: Application runtime** (WASI integration)
 
 ---
-*ParanukOS - 通过隔离实现稳定性。*
+*ParanukOS - Stability through isolation.*
