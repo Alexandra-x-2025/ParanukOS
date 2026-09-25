@@ -5,14 +5,25 @@ authors = ["Alexander"]
 edition = "2024"
 
 [dependencies]
+# 核心 UEFI 支持，开启 logger 特性用于调试输出
+uefi = { version = "0.39", features = ["logger"] }
+
+# 日志门面（Facade）
+log = "0.4"
+
+# 提供无锁 Mutex 和原子操作，是构建全局分配器的基础
+spin = "0.9"
 
 [profile.dev]
 panic = "abort"
 
 [profile.release]
+opt-level = "z"
+lto = true
 panic = "abort"
 
 [[bin]]
 name = "paranukos"
+path = "src/main.rs"
 test = false
 bench = false
