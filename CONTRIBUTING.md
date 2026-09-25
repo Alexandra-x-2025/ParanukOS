@@ -1,51 +1,58 @@
-# ParanukOS 贡献指南
+# ParanukOS Contributing Guide
 
 [English] | [中文](CONTRIBUTING_CN.md)
 
-欢迎加入 **ParanukOS** 项目！我们非常高兴你能参与构建这个基于 Rust 的高可靠性微内核操作系统。
+Welcome to **ParanukOS**! We are delighted that you want to help build this high-reliability, Rust-based microkernel operating system.
 
-通过为本项目做出贡献，你正在帮助我们建立一个安全、稳定且可扩展的计算基础。请在提交任何代码之前，仔细阅读本指南。
+By contributing you are helping us establish a secure, stable and extensible computing foundation. Please read this guide carefully before submitting any code.
 
-## 📜 核心原则
-在编写代码之前，请确保你的工作符合我们的核心哲学：
-*   **隔离优先 (Isolation First):** 所有组件（驱动程序、文件系统等）必须尽可能运行在用户态。
-*   **微内核纯粹性 (Microkernel Purity):** 内核应仅负责最基础的任务，如 IPC、内存管理和基本调度。
-*   **Rust 安全性:** 我们利用 Rust 来消除内存安全漏洞。严格遵守 `#![no_std]` 约束是强制性的。
+## 📜 Core Principles
+Before writing code, make sure your work matches our core philosophy:
+*   **Isolation First:** every component (drivers, file systems, …) must run in user mode wherever possible, isolated from the others.
+*   **Microkernel Purity:** the kernel should only handle the most fundamental tasks, such as IPC, memory management and basic scheduling.
+*   **Rust Safety:** we use Rust to eliminate memory-safety bugs. Strictly honouring the `#![no_std]` constraint is mandatory.
 
-## 🛠️ 开发环境
-为了高效贡献，你需要准备以下工具：
-*   **Rust 工具链:** Rust Nightly (内核开发需要某些实验性特性)。
-*   **QEMU:** 用于测试和调试。
-*   **构建工具:** 确保 `cargo` 和相关的编译依赖已安装。
+## 🛠️ Development Environment
+You need the following to contribute efficiently:
+*   **Rust toolchain:** Rust **stable** — verified with 1.98. Nightly is *not* currently required.
+*   **Targets:** `x86_64-unknown-uefi` (the bootloader itself) and `x86_64-unknown-none` (used by the smoke test to build a placeholder kernel image).
+*   **QEMU and OVMF:** needed to run and test the image.
+*   **Build tools:** `cargo` plus the usual compilation dependencies.
 
-### 环境配置
-1. 克隆仓库: `git clone <repo_url>`
-2. 安装依赖：按照项目中的相关说明进行操作。
-3. 运行环境检查脚本，确保你的工具链已就绪。
+### Setup
+1.  Clone the repository: `git clone <repo_url>`
+2.  Add the required targets: `rustup target add x86_64-unknown-uefi x86_64-unknown-none`
+3.  Install QEMU and OVMF: `sudo apt install qemu-system-x86 ovmf` (Debian/Ubuntu) or `sudo dnf install qemu-system-x86 edk2-ovmf` (Fedora/RHEL).
 
-## 💻 代码规范
-*   **语言:** 所有核心系统代码必须使用 Rust 编写。
-*   **无标准库约束:** 内核空间代码必须严格遵循 `#![no_std]`。
-*   **内存安全:** 除非为了直接操作硬件而绝对必要，否则避免使用 `unsafe` 代码块。如果必须使用，请提供详细的注释解释其安全性。
-*   **IPC 协议:** 所有进程间通信必须遵循项目定义的 IPC 消息格式和能力令牌（Capability Tokens）。
+Build, run and test commands are documented in [README.md](README.md).
 
-## 🧪 测试与质量保证
-我们通过严格的验证来维持系统的可靠性：
-1.  **单元测试:** 每个新功能或模块都应包含相应的单元测试。
-2.  **集成测试:** 核心组件（如 IPC、内存管理）必须通过 QEMU 集成测试验证。
-3.  **文档更新:** 任何新的功能或重大的架构变动必须同步更新 `docs/architecture/` 下的文档以及 `README.md`。
+## 💻 Code Style
+*   **Language:** all core system code must be written in Rust.
+*   **No standard library:** kernel-space code must strictly follow `#![no_std]`.
+*   **Memory safety:** avoid `unsafe` blocks unless they are genuinely required to touch hardware. If you must use one, document why it is sound.
+*   **IPC protocol:** all inter-process communication must follow the project's IPC message format and capability tokens.
 
-## 🚀 拉取请求 (Pull Request) 流程
-1.  **Fork 与分支:** 从 `main` 分支创建一个功能分支。
-2.  **提交信息:** 使用清晰、描述性的提交信息（例如：`feat(ipc): 添加零拷贝消息传递`）。
-3.  **文档同步:** 确保所有新 API 已在项目文档中记录。
-4.  **代码审查:** 提交 PR 后，我们将重点审查以下内容：
-    *   内存安全性及 `unsafe` 代码的使用合理性。
-    *   是否符合微内核的隔离原则。
-    *   IPC 调用对系统性能的影响。
+## 🧪 Tests and Quality Assurance
+We maintain reliability through strict verification. Before opening a pull request, make sure all of the following pass — they are exactly what CI runs:
 
-## 🤝 沟通与协作
-我们非常重视清晰的沟通。如果你遇到技术障碍或有架构上的疑问，请在开始大规模开发前通过项目的指定渠道进行讨论。
+1.  **Static checks:** `cargo fmt --all -- --check` and `cargo clippy --all-targets -- -D warnings`.
+2.  **Image check:** `python3 tests/check_pe.py target/x86_64-unknown-uefi/debug/paranukos.efi` verifies that the artifact is a loadable PE32+ EFI application (structure-level, not a `file(1)` string match).
+3.  **Boot tests:** `bash tests/smoke.sh` boots the image under QEMU/OVMF and asserts both the success path (a valid kernel image is found, validated and loaded) and the failure path (no kernel image → graceful error).
+4.  **Unit tests:** `[[bin]] test = false` is required for this UEFI binary — a `std`-based test harness conflicts with the UEFI panic handler and fails to compile with a duplicate `panic_impl` lang item. Logic worth unit-testing should therefore live in dependency-free modules or crates that can be built and tested for the host target.
+5.  **Documentation:** every new feature or significant architectural change must update the docs under `docs/architecture/` — and, per `AGENTS.md`, keep the Chinese (`_CN`) counterpart in sync.
+
+## 🚀 Pull Request Process
+1.  **Fork and branch:** create a topic branch from `main`.
+2.  **Commit messages:** use clear, descriptive messages (for example `feat(ipc): add zero-copy message passing`).
+3.  **One concern per pull request:** keep changes focused so they can be reviewed and reverted independently.
+4.  **Documentation sync:** make sure any new API is documented.
+5.  **Code review:** once the PR is open we focus on:
+    *   memory safety and the justification for any `unsafe` usage;
+    *   conformance with the microkernel isolation principles;
+    *   the performance impact of IPC calls.
+
+## 🤝 Communication
+We value clear communication. If you hit a technical obstacle or have an architectural question, please discuss it through the project's channels before starting large-scale work.
 
 ---
-*感谢你帮助我们共同构建更稳定、更安全的 ParanukOS！*
+*Thank you for helping us build a more stable and more secure ParanukOS!*
