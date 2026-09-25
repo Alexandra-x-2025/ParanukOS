@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-smoke:
+    name: 构建 + QEMU 冒烟测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 QEMU 与 OVMF
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf
+
+      - name: 安装 Rust 工具链与目标
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustup target add x86_64-unknown-uefi x86_64-unknown-none
+          rustc --version
+
+      - name: 格式检查
+        run: cargo fmt --all -- --check
+
+      - name: Clippy 静态检查
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: 构建（debug / release）
+        run: |
+          cargo build
+          cargo build --release
+
+      - name: 校验产物为 PE32+ EFI 应用
+        # 用结构解析而不是 `file` 的输出措辞做断言：后者的措辞会随 binutils 版本变化
+        run: |
+          file target/x86_64-unknown-uefi/debug/paranukos.efi
+          file target/x86_64-unknown-uefi/release/paranukos.efi
+          python3 tests/check_pe.py \
+            target/x86_64-unknown-uefi/debug/paranukos.efi \
+            target/x86_64-unknown-uefi/release/paranukos.efi
+
+      - name: QEMU 冒烟测试
+        run: bash tests/smoke.sh
+
+      - name: 失败时上传串口日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-logs
+          path: target/smoke-logs/
+          if-no-files-found: ignore
