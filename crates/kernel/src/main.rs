@@ -1,11 +1,12 @@
-//! ParanukOS 内核 —— Milestone 1：异常与日志基础设施。
+//! ParanukOS 内核 —— Milestone 2a：自建恒等映射页表。
 //!
-//! 在 M0（自检 + 串口输出）之上：
-//! * 安装最小 IDT（32 个 CPU 异常），使内核出错时能**打印诊断**而不是三重故障重启；
-//! * panic 处理器与异常处理器统一以"内核崩溃"退出码 41 结束（与自检失败的 39 区分）；
-//! * 统一的最小串口日志设施（`kinfo!` / `kwarn!` / `kerror!`）。
+//! 在 M0（自检 + 串口输出）与 M1（IDT / panic / 日志）之上：
+//! * 解析 `BootInfo` 里的 UEFI 内存图，**自建四级恒等映射页表**并写入 `CR3`；
+//! * 只映射与 RAM 区域相交的地址：非 RAM 与页 0 一律 not present，误访问即 `#PF`；
+//! * 内存初始化失败以退出码 43 结束，与"交接契约坏了"的 39 区分。
 //!
-//! 依据 `docs/architecture/kernel_interface.md`：§4（入口 ABI）、§7.2（退出码）、§9（M1）。
+//! 依据 `docs/architecture/kernel_interface.md`（§4 入口 ABI、§7.2 退出码）与
+//! `docs/architecture/memory_subsystem.md`（§3 页表、§4 内存图、§7 退出码 43）。
 
 #![no_std]
 #![no_main]
@@ -13,9 +14,13 @@
 
 mod idt;
 mod logging;
+mod memory;
 mod serial;
 
-use boot_info::{BootInfo, EXIT_VALUE_KERNEL_FAILURE, EXIT_VALUE_KERNEL_FAULT, qemu_exit_code};
+use boot_info::{
+    BootInfo, EXIT_VALUE_KERNEL_FAILURE, EXIT_VALUE_KERNEL_FAULT, EXIT_VALUE_KERNEL_MEMORY_FAILURE,
+    qemu_exit_code,
+};
 // 注入模式下不会走到"正常结束"，因此该常量仅在非注入构建中使用
 #[cfg(not(feature = "inject-fault"))]
 use boot_info::EXIT_VALUE_KERNEL_OK;
@@ -44,7 +49,7 @@ pub extern "C" fn kernel_main(boot_info: &BootInfo) -> ! {
     unsafe { idt::install() };
     kinfo!("IDT 已安装（32 个异常向量）");
 
-    kinfo!("ParanukOS kernel alive (Milestone 1)");
+    kinfo!("ParanukOS kernel alive (Milestone 2)");
 
     // 1. 校验 BootInfo 头部
     if let Err(err) = boot_info.validate() {
@@ -104,6 +109,39 @@ pub extern "C" fn kernel_main(boot_info: &BootInfo) -> ! {
     }
     kinfo!("rsdp=0x{:X}", boot_info.rsdp);
 
+    // 5. 内存子系统：建立并安装内核自己的恒等映射页表（M2a）。
+    //    从这一步起，内核不再依赖固件遗留的页表：MMIO 不会被映射，未映射地址一律 #PF。
+    // SAFETY: 单核、中断已关闭、只调用一次；调用后不再使用任何引导服务。
+    let tables = match unsafe { memory::install(boot_info) } {
+        Ok(tables) => tables,
+        Err(err) => {
+            kerror!("memory init FAILED: {err}");
+            finish(EXIT_VALUE_KERNEL_MEMORY_FAILURE);
+        }
+    };
+    kinfo!(
+        "paging: 恒等映射 {} 个 4 KiB 页 + {} 个 2 MiB 大块（{} MiB，不含空洞）",
+        tables.pages,
+        tables.blocks,
+        tables.mapped_bytes >> 20
+    );
+    kinfo!(
+        "paging: 上限 0x{:X}，页表 {} 页，CR3=0x{:X}",
+        tables.limit,
+        tables.tables_used,
+        tables.pml4_phys
+    );
+    kinfo!("paging: 切换 CR3 后 BootInfo 仍可读（恒等映射覆盖了交接结构）");
+
+    // 故障注入（仅测试）：页 0 按策略永不映射。固件的恒等映射通常把页 0 也映射了，
+    // 因此"这一读会 #PF"就直接证明了生效的是内核自己的页表。
+    // 正常情况下这一步**不会返回**（#PF → 41）；若真的返回，说明策略没生效，判为 43。
+    #[cfg(feature = "inject-null-deref")]
+    if probe_null_page() {
+        kerror!("地址 0 可读：内核页表未按策略生效（页 0 本应 not present）");
+        finish(EXIT_VALUE_KERNEL_MEMORY_FAILURE);
+    }
+
     kinfo!("self-check OK");
 
     // 故障注入（仅测试）：验证异常处理器路径。`ud2` 触发 #UD(6)。
@@ -116,6 +154,18 @@ pub extern "C" fn kernel_main(boot_info: &BootInfo) -> ! {
 
     #[cfg(not(feature = "inject-fault"))]
     finish(EXIT_VALUE_KERNEL_OK)
+}
+
+/// 故障注入（仅测试）：读取按策略未映射的页 0。
+///
+/// 返回值只在"页 0 竟然可读"时产生——正常情况下这次读取触发 `#PF`，永不返回。
+#[cfg(feature = "inject-null-deref")]
+fn probe_null_page() -> bool {
+    kinfo!("[inject] 故意读取未映射的页 0，用于验证内核页表确实生效");
+    // SAFETY: 页 0 按决策 #21 未映射；读到值即说明内核页表未生效，由调用方报告失败。
+    let value = unsafe { core::ptr::read_volatile(core::ptr::null::<u8>()) };
+    kinfo!("[inject] 页 0 读到 {value}");
+    true
 }
 
 /// 结束内核运行：测试模式下通过 `isa-debug-exit` 报告退出码，交互模式下 `hlt` 停机。
