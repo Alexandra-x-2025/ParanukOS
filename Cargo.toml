@@ -4,6 +4,13 @@ version = "0.1.0"
 authors = ["Alexander"]
 edition = "2024"
 
+[workspace]
+# 纯逻辑放在零依赖的独立 crate 中，这样可以在宿主平台上被单元测试覆盖：
+# UEFI 二进制必须 `test = false`（原因见下方 [[bin]] 注释），
+# 因此单元测试由 `cargo test -p kernel-image --target x86_64-unknown-linux-gnu` 承担。
+resolver = "3"
+members = ["crates/kernel-image"]
+
 [dependencies]
 # 核心 UEFI 支持。显式关闭默认特性，按需开启：
 #   - logger:           通过 log 门面把日志输出到固件控制台
@@ -20,6 +27,9 @@ uefi = { version = "0.39", default-features = false, features = [
 # 日志门面（Facade），由 uefi 的 logger 特性驱动
 log = "0.4"
 
+# 内核镜像（ELF64/x86-64）头部校验。零依赖，可针对宿主平台做单元测试。
+kernel-image = { path = "crates/kernel-image" }
+
 [profile.dev]
 panic = "abort"
 
@@ -31,5 +41,9 @@ panic = "abort"
 [[bin]]
 name = "paranukos"
 path = "src/main.rs"
+# 必须保持 `test = false`：UEFI 目标下的 std 测试框架会与 uefi crate 的
+# panic_handler 冲突，编译时报「duplicate lang item `panic_impl`」。
+# 因此本二进制不承载单元测试，可单测的逻辑放在 crates/kernel-image 中，
+# 端到端行为由 tests/smoke.sh 在 QEMU 下验证。
 test = false
 bench = false

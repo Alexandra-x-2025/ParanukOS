@@ -1,0 +1,11 @@
+[package]
+name = "kernel-image"
+version = "0.1.0"
+edition = "2024"
+description = "ParanukOS 内核镜像（ELF64/x86-64）头部校验"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# 有意保持零依赖：这样既能被 no_std 的 UEFI 引导器使用，
+# 又能直接在宿主平台上跑单元测试（见 tests 模块）。

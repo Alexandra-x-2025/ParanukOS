@@ -52,7 +52,7 @@ fn main() -> Status {
             }
             Err(err) => {
                 let _ = stdout.set_color(Color::Red, Color::Black);
-                let _ = writeln!(stdout, "[-] 内核加载失败: {err:?}");
+                let _ = writeln!(stdout, "[-] 内核加载失败: {err}");
                 err.status()
             }
         }
