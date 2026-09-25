@@ -5,14 +5,20 @@ authors = ["Alexander"]
 edition = "2024"
 
 [dependencies]
-# 核心 UEFI 支持，开启 logger 特性用于调试输出
-uefi = { version = "0.39", features = ["logger"] }
+# 核心 UEFI 支持。显式关闭默认特性，按需开启：
+#   - logger:           通过 log 门面把日志输出到固件控制台
+#   - alloc:            uefi::fs / boot::find_handles 等需要堆的 API
+#   - global_allocator: 把 uefi::allocator::Allocator 注册为 #[global_allocator]
+#   - panic_handler:    默认 panic 处理器（打印 panic 信息并复位，而非静默自旋）
+uefi = { version = "0.39", default-features = false, features = [
+    "alloc",
+    "global_allocator",
+    "logger",
+    "panic_handler",
+] }
 
-# 日志门面（Facade）
+# 日志门面（Facade），由 uefi 的 logger 特性驱动
 log = "0.4"
-
-# 提供无锁 Mutex 和原子操作，是构建全局分配器的基础
-spin = "0.9"
 
 [profile.dev]
 panic = "abort"
