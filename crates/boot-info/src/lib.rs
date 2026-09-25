@@ -160,6 +160,12 @@ pub const EXIT_VALUE_KERNEL_FAILURE: u8 = 0x13;
 /// 与 [`EXIT_VALUE_KERNEL_FAILURE`] 区分：39 表示"内核按预期判定失败"，
 /// 41 表示"内核自己崩了"——两者的排查方向完全不同。
 pub const EXIT_VALUE_KERNEL_FAULT: u8 = 0x14;
+/// 写入值：内核内存初始化失败（页表、页帧分配器或内核堆）。
+///
+/// 与 [`EXIT_VALUE_KERNEL_FAILURE`]（39）区分：39 表示"引导器与内核之间的契约坏了"
+/// （`BootInfo` 非法、内存图无法解析、没有 RSDP），43 表示"契约没问题，但内存子系统
+/// 自己起不来"。依据 `docs/architecture/memory_subsystem.md` §7.1。
+pub const EXIT_VALUE_KERNEL_MEMORY_FAILURE: u8 = 0x15;
 
 /// QEMU 把写入 `isa-debug-exit` 的值转换为进程退出码：`(value << 1) | 1`。
 #[must_use]
@@ -177,6 +183,8 @@ pub const EXIT_CODE_KERNEL_OK: i32 = qemu_exit_code(EXIT_VALUE_KERNEL_OK);
 pub const EXIT_CODE_KERNEL_FAILURE: i32 = qemu_exit_code(EXIT_VALUE_KERNEL_FAILURE);
 /// 内核未处理异常 / panic → 41。
 pub const EXIT_CODE_KERNEL_FAULT: i32 = qemu_exit_code(EXIT_VALUE_KERNEL_FAULT);
+/// 内核内存初始化失败 → 43。
+pub const EXIT_CODE_KERNEL_MEMORY_FAILURE: i32 = qemu_exit_code(EXIT_VALUE_KERNEL_MEMORY_FAILURE);
 
 #[cfg(test)]
 mod tests {
@@ -278,8 +286,12 @@ mod tests {
         assert_eq!(EXIT_CODE_KERNEL_OK, 37);
         assert_eq!(EXIT_CODE_KERNEL_FAILURE, 39);
         assert_eq!(EXIT_CODE_KERNEL_FAULT, 41);
+        assert_eq!(EXIT_CODE_KERNEL_MEMORY_FAILURE, 43);
         // "自检失败"与"内核崩溃"也必须可区分
         assert_ne!(EXIT_CODE_KERNEL_FAILURE, EXIT_CODE_KERNEL_FAULT);
+        // 交接契约坏了（39）与内存子系统起不来（43）的排查方向不同
+        assert_ne!(EXIT_CODE_KERNEL_FAILURE, EXIT_CODE_KERNEL_MEMORY_FAILURE);
+        assert_ne!(EXIT_CODE_KERNEL_FAULT, EXIT_CODE_KERNEL_MEMORY_FAILURE);
         // 33 与 37 必须不同，否则测试无法区分"引导器装完"与"内核真的跑了"
         assert_ne!(EXIT_CODE_BOOTLOADER_OK, EXIT_CODE_KERNEL_OK);
         assert_eq!(DEBUG_EXIT_PORT, 0xF4);
