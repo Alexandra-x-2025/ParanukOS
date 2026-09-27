@@ -102,6 +102,11 @@ ESP 的 `\EFI\PARANUKO\KERNEL.ELF` 处查找内核镜像，校验它是 ELF64 / 
 向 64 个块的每一个字节写入并读回、释放一半后重新分配、断言重复释放被拒绝、断言堆最终合并回单个
 空闲块。接口定义见 [docs/architecture/memory_subsystem_CN.md](docs/architecture/memory_subsystem_CN.md)。
 
+内核还会装载自己的 **GDT、TSS 与 IST 栈**，重映射 **8259 PIC** 并把 **PIT 编到 100 Hz**（纯端口
+I/O，不需要映射 MMIO），用中断安全自旋锁把堆与页帧分配器包起来，并跑起一个**轮转调度骨架**——
+它的纯逻辑在 `crates/kernel-sched`（宿主单测覆盖）。M3a 还**不做**上下文切换：时钟只计 tick，并
+证明真正的双重故障会落在 IST 栈上，而不是三重故障重启。
+
 ### 测试
 
 ```bash
@@ -116,6 +121,8 @@ bash tests/smoke.sh                                                       # QEMU
 
 ### 已知限制
 
+*   **目前只到 Milestone 0–3a。** 内核还没有线程：时钟在走，但没有任何东西被抢占（M3b 才补上
+    上下文切换、线程与回收）。
 *   **目前只到 Milestone 0–2。** 引导器会装载内核、调用 `exit_boot_services` 并跳转到入口；
     内核随后校验 `BootInfo`、安装自己的 IDT 与页表、拉起页帧分配器与内核堆、在 COM1 打印摘要并
     退出。**尚无用户态、IPC 与调度** —— 顺序见 `docs/architecture/kernel_interface.md` §9。
@@ -124,6 +131,8 @@ bash tests/smoke.sh                                                       # QEMU
 *   只发放 `EfiConventionalMemory`。在默认 128 MiB 的 QEMU 机器上，这在 127 MiB 的受管理区间里
     约合 78 MiB；Boot Services / Runtime Services / ACPI 内存刻意留待"复用前先测量"。
 *   只接受 `ET_EXEC` 内核镜像；PIE（`ET_DYN`）内核需要重定位处理，目前未实现。
+*   中断从 M3a 起就是开的，因此内核原则上可被抢占，但还没有东西会切换；持锁纪律（"持锁不 yield"、
+    "ISR 里不分配"）已经就位并受检查。
 *   内核虽然建立了映射，但还没有按需分页、W^X 与按进程隔离的地址空间；并且**刻意不映射
     MMIO**：串口走端口 I/O，目前不触碰任何 MMIO 设备。
 

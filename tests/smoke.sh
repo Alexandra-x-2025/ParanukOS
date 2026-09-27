@@ -11,6 +11,7 @@
 #   39  内核自检失败（magic/version 不匹配等）
 #   41  内核发生未处理异常或 panic（意外崩溃）
 #   43  内核内存初始化失败（页表构建/安装、页帧分配器、内核堆）
+#   45  内核调度自检失败（GDT/TSS/IST、时钟中断、线程、锁）
 #   124 超时：应用没有主动退出（判失败）
 #
 # 退出码常量与 crates/boot-info 保持一致。
@@ -36,6 +37,7 @@ EXIT_KERNEL_OK=37
 EXIT_KERNEL_FAILURE=39
 EXIT_KERNEL_FAULT=41
 EXIT_KERNEL_MEMORY_FAILURE=43
+EXIT_KERNEL_SCHED_FAILURE=45
 
 WORK="$(mktemp -d)"
 ESP_DIR="$(mktemp -d)/esp"
@@ -195,6 +197,24 @@ else
     show_log "$LOG_DIR/m0-positive.log"
 fi
 
+# --- M3a：描述符表、中断基础设施与调度器（threads_and_scheduling.md §11.3） ---
+if grep -qE 'gdt: GDT/TSS 已装载（CS=0x8 SS=0x10，TSS=0x[0-9A-F]+，IST1=0x[0-9A-F]+，IST2=0x[0-9A-F]+）' "$LOG_DIR/m0-positive.log"; then
+    ok "GDT/TSS 已装载，选择子仍为 0x08/0x10，两个 IST 栈非零"
+else
+    bad "GDT/TSS 日志不符（选择子被改坏或 IST 未填）"
+    show_log "$LOG_DIR/m0-positive.log"
+fi
+grep_log "$LOG_DIR/m0-positive.log" 'pic: 8259 已重映射到 0x20..0x2F，PIT 分频 11932（100 Hz），只放行 IRQ0' \
+    "PIC 已重映射，PIT 100 Hz（分频四舍五入到 11932）"
+grep_log "$LOG_DIR/m0-positive.log" 'sched: 1 个线程就绪，PIT 100 Hz，GDT/TSS 已装载' \
+    "调度器已登记引导上下文"
+if grep -qE 'timer: 观察到 [3-9][0-9]* 次 tick（[0-9]+ 次调度决策）' "$LOG_DIR/m0-positive.log"; then
+    ok "中断开启后时钟真的在推进（≥ 3 次 tick）"
+else
+    bad "tick 数不足 3：PIT/IRQ0 未生效"
+    show_log "$LOG_DIR/m0-positive.log"
+fi
+
 # 映射规模必须覆盖测试虚拟机的主要内存（QEMU 默认 128 MiB，这里放宽到 64 MiB）
 mapped_mib="$(sed -n 's/.*个 2 MiB 大块（\([0-9]*\) MiB.*/\1/p' "$LOG_DIR/m0-positive.log" | head -1)"
 if [ -n "$mapped_mib" ] && [ "$mapped_mib" -ge 64 ]; then
@@ -270,6 +290,22 @@ boot_case "$WORK/loader.efi" "$WORK/KERNEL-double.ELF" "$LOG_DIR/m2b-double-allo
     "页帧重复分配：内存自检发现并以 43 退出"
 grep_log "$LOG_DIR/m2b-double-alloc.log" 'memory self-check FAILED' "打印了自检失败"
 grep_log "$LOG_DIR/m2b-double-alloc.log" '两次分配返回了同一个页帧' "失败原因指明是重复分配"
+
+# --- H. 故障注入：真正的双重故障 → #DF 落在 IST1 栈上 → 41（M3a） ---
+#
+# 把 #PF/#GP 的门改坏再访问未映射地址：交付 #PF 失败 → 交付 #GP 也失败 → 真正的 #DF。
+# 如果 IST 没配好，这里会是三重故障重启（即超时 124），而不是一条完整诊断。
+echo "==> 附加用例：双重故障与 IST（故障注入）"
+if ! cargo build -p kernel --target "$BARE_TARGET" --features inject-double-fault; then
+    echo "[-] 注入双重故障的内核构建失败。" >&2
+    exit 1
+fi
+cp "target/${BARE_TARGET}/debug/kernel" "$WORK/KERNEL-df.ELF"
+boot_case "$WORK/loader.efi" "$WORK/KERNEL-df.ELF" "$LOG_DIR/m3a-double-fault.log" "$EXIT_KERNEL_FAULT" \
+    "真正的双重故障：#DF 落在 IST1 栈上并以 41 退出"
+grep_log "$LOG_DIR/m3a-double-fault.log" '#DF 双重故障' "指认了向量（#DF 双重故障）"
+grep_log "$LOG_DIR/m3a-double-fault.log" '实际运行栈：IST1 栈' "直接证明异常换到了 IST1 栈（而不是三重故障）"
+grep_log "$LOG_DIR/m3a-double-fault.log" 'error_code=0x0' "帧格式完整（真正的 #DF 带错误码）"
 
 echo
 echo "结果: ${pass} 项通过, ${fail} 项失败"

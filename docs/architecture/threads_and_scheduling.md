@@ -60,9 +60,9 @@ M1 deliberately ran on the firmware's GDT and installed no IST ("needed before u
 M1 decision record). M3 installs its own, because preemption turns the cost of a triple fault up: a
 `#DF` raised while the kernel stack is unusable is exactly what IST exists to survive [decision #26].
 
-* a static GDT with 6 entries: null, kernel code (64-bit, DPL 0), kernel data (DPL 0), and a 16-byte
-  TSS descriptor; two spare slots are reserved for M4's user code/data so that adding them later does
-  not move the existing selectors;
+* a static GDT with 8 entries: null, kernel code (64-bit, DPL 0), kernel data (DPL 0), a 16-byte TSS
+  descriptor (two slots), and three spare slots reserved for M4's user code/data so that adding them
+  later does not move the existing selectors;
 * selectors stay the conventional `0x08` (code) and `0x10` (data), so reloading `CS`/`SS`/`DS`/`ES`
   after `lgdt` keeps the currently executing code valid;
 * the TSS holds `rsp0` (used only if we ever take an interrupt from CPL 3 — M4) and two IST stacks:
@@ -72,6 +72,11 @@ M1 decision record). M3 installs its own, because preemption turns the cost of a
 
 The kernel asserts after `lgdt` that `sgdt` reports our table, and that `CS`/`SS` still carry the
 expected selectors. A wrong GDT is an immediate triple fault, so this assertion is not optional.
+
+`ltr` must load the TSS **before** any IST gate can be used, so the IDT is installed a second time
+after the descriptor tables: the first install (M1, early) leaves every gate on the current stack, and
+the second arms the IST indices for `#DF`/NMI [decision #37]. Until then a `#DF` would try to read a
+TSS through an invalid task register and escalate instead of being diagnosed.
 
 ## 4. Interrupt infrastructure
 
@@ -322,7 +327,7 @@ that needs a CPU — `switch`, port I/O, `fxsave`, the IDT — stays in `crates/
 
 | Code | Meaning | Reported by | Status |
 |---|---|---|---|
-| **45** | **Kernel scheduler self-check failed** — a thread could not be created, the round-robin order was wrong, a preempted thread made no progress, the lock did not provide mutual exclusion, or a stack canary was destroyed | kernel | new in M3 |
+| **45** | **Kernel scheduler self-check failed** — the descriptor tables or interrupt infrastructure could not be initialised, the timer never ticked, a thread could not be created, the round-robin order was wrong, a preempted thread made no progress, the lock did not provide mutual exclusion, or a stack canary was destroyed | kernel | new in M3 |
 
 41 stays "the kernel crashed" (CPU exception or panic); 43 stays "memory initialisation failed". The
 three have different owners, which is the whole point of keeping them apart.
@@ -369,12 +374,17 @@ outcome and a failure exits **45** with the step number, the invariant and the a
    (`yield` with a lock held → 41) is deliberately **not** triggered here, because a self-check
    failure must be reported as 45, not as a crash.
 
+> Note on `int $8`: it was the first attempt at this injection and it does switch to IST1, but a
+> **software** `int n` never pushes an error code, so the frame is misparsed and every field in the
+> diagnostic is garbage. The injection was therefore changed to a real double fault (a fault while
+> delivering a fault) so that the evidence — not just the exit code — is trustworthy [decision #36].
+
 Two test-only features make the failures reachable rather than theoretical [decision #35]:
 
 | Feature | Effect | Expected |
 |---|---|---|
 | `inject-no-preempt` | the timer keeps counting but the scheduler never switches to another thread | self-check step 3 fails → **45** |
-| `inject-double-fault` | after the scheduler is up, execute `int $8` | the `#DF` gate switches to IST1, the handler reports and exits **41**; a triple fault instead would be a timeout (124) or a reboot, i.e. a visible failure |
+| `inject-double-fault` | corrupt the `#PF` and `#GP` gate selectors, then read an unmapped address: delivering `#PF` fails, delivering `#GP` fails, and the CPU raises a **genuine** `#DF` | the `#DF` gate switches to IST1, the handler prints a complete frame (`error_code=0x0`, the faulting `rip`, the pre-fault `rsp`) plus `实际运行栈：IST1 栈`, then exits **41**; a triple fault instead would be a timeout (124), i.e. a visible failure |
 
 ## 11. Delivery plan, deliverables and acceptance criteria
 
@@ -382,7 +392,7 @@ Two test-only features make the failures reachable rather than theoretical [deci
 
 | Part | Content | Why |
 |---|---|---|
-| **M3a** | `crates/kernel-sched` (host-tested, pure); GDT/TSS/IST; PIC + PIT; locks; timer ISR wired to the tick counter (no switching yet) | the descriptor tables and the interrupt plumbing are where a mistake is a triple fault or a silent storm; proving "the timer ticks, the IDT is ours, `#DF` lands on IST" is a milestone of its own |
+| **M3a** ✅ (PR #19) | `crates/kernel-sched` (host-tested, pure); GDT/TSS/IST; PIC + PIT; locks; timer ISR wired to the tick counter (no switching yet) | the descriptor tables and the interrupt plumbing are where a mistake is a triple fault or a silent storm; proving "the timer ticks, the IDT is ours, `#DF` lands on IST" is a milestone of its own |
 | **M3b** | `Context` + `switch` + trampoline; thread create/exit/yield; the round-robin scheduler in the timer path; reaping; the §10 self-check; the two injection features; smoke cases | builds on a proven interrupt path, and the switching itself is small enough to be reviewed as a unit |
 
 ### 11.2 Deliverables
@@ -401,15 +411,43 @@ Two test-only features make the failures reachable rather than theoretical [deci
 | 10 | Docs | this document, `kernel_interface.md` §7.2/§9, `memory_subsystem.md` §5.4 (decision #20 is superseded), README — all bilingual |
 
 ### 11.3 Acceptance criteria — machine-checkable
-- [ ] the kernel logs `sched: N 个线程就绪，PIT 100 Hz，GDT/TSS 已装载` before the self-check;
-- [ ] self-check steps 1–6 pass on real QEMU + OVMF (all six are assertions, not prints);
-- [ ] the tick counter is > 0 and the boot context observed at least one preemption during step 3;
-- [ ] after step 5 the frame allocator's free count is exactly its pre-thread value (no stack leaks);
-- [ ] the kernel exits **37**; `inject-no-preempt` exits **45**; `inject-double-fault` exits **41**;
-- [ ] the existing assertions (37/35/35/39/41/41/43) do not regress — the smoke test grows to ≥ 42;
-- [ ] `cargo test -p kernel-sched -p kernel-memory …` passes, and clippy/fmt stay clean in every
-      configuration, including the two new features;
-- [ ] `check_kernel_elf.py` still passes (the image must stay under `MAX_KERNEL_PAGES`).
+The status marker says which part delivers each item.
+
+- [x] (M3a) the kernel logs `sched: N 个线程就绪，PIT 100 Hz，GDT/TSS 已装载`;
+- [x] (M3a) `gdt: GDT/TSS 已装载（CS=0x8 SS=0x10，TSS=…，IST1=…，IST2=…）` — selectors unchanged,
+      both IST stacks non-zero;
+- [x] (M3a) `pic: 8259 已重映射到 0x20..0x2F，PIT 分频 11932（100 Hz），只放行 IRQ0`;
+- [x] (M3a) with interrupts enabled the tick counter reaches ≥ 3 inside a bounded spin budget, i.e.
+      the PIT and IRQ0 really work;
+- [x] (M3a) a genuine `#DF` lands on IST1 and prints a complete frame — `inject-double-fault` → **41**;
+- [x] (M3a) the frame-allocator allocate/free round trip returns to the exact same free count while
+      the new lock is in use;
+- [x] (M3a) no regression in the existing assertions (37/35/35/39/41/41/43);
+- [x] (M3a) `cargo test -p kernel-sched …` passes; clippy/fmt clean in every configuration, including
+      `inject-double-fault`;
+- [x] (M3a) `check_kernel_elf.py` passes (the image grew to 109 pages, budget 256);
+- [ ] (M3b) self-check steps 1–6 pass on real QEMU + OVMF (all six are assertions, not prints);
+- [ ] (M3b) the boot context observed at least one preemption during step 3;
+- [ ] (M3b) after step 5 the frame allocator's free count is exactly its pre-thread value (no leaks);
+- [ ] (M3b) `inject-no-preempt` exits **45**; the smoke test grows to ≥ 42 assertions.
+
+Measured on QEMU 8.2.2 + OVMF (M3a, 43/43 smoke assertions green):
+
+```
+gdt: GDT/TSS 已装载（CS=0x8 SS=0x10，TSS=0x123110，IST1=0x26F000，IST2=0x270000）
+pic: 8259 已重映射到 0x20..0x2F，PIT 分频 11932（100 Hz），只放行 IRQ0
+sched: 1 个线程就绪，PIT 100 Hz，GDT/TSS 已装载
+timer: 观察到 3 次 tick（0 次调度决策），中断已按退出协议关闭
+```
+
+and for the injected double fault:
+
+```
+未处理的 CPU 异常: #DF 双重故障 (vector 8)
+  error_code=0x0 rip=0x1015FA cs=0x8 rflags=0x6
+  rsp=0x6005420 ss=0x10
+  实际运行栈：IST1 栈（#DF）
+```
 
 ### 11.4 Known pitfalls, most likely first
 
@@ -442,6 +480,8 @@ Two test-only features make the failures reachable rather than theoretical [deci
 | 33 | Thread 0 is the boot context on the bootloader's stack | never freed, never started through the trampoline | `kernel_main` is already a context; wrapping it costs nothing and keeps the switch path uniform | high |
 | 34 | New exit code 45 for scheduler self-check failure | distinct from 39/41/43 | "the scheduler misbehaved" is neither a contract break, a crash, nor a memory failure | medium (released meanings are frozen) |
 | 35 | Injections: `inject-no-preempt` → 45 and `inject-double-fault` → 41 | both reachable from `tests/smoke.sh` | the two claims most worth falsifying are "the timer really preempts" and "a `#DF` lands on IST instead of triple-faulting" | high |
+| 36 | The `#DF` injection is a **genuine** double fault (corrupt the `#PF`/`#GP` gate selectors, then touch an unmapped address), not `int $8` | complete, trustworthy frame in the diagnostic | a software `int n` pushes no error code, so `int $8` misparses the frame and prints garbage — the claim would then be "proven" by an exit code alone | high |
+| 37 | The IDT is installed twice: once early (M1, every gate on the current stack) and again after the TSS is loaded, when the `#DF`/NMI gates are armed with their IST indices | IST gates only exist once a valid task register does | an IST gate without a loaded TSS escalates to a triple fault, which is exactly what IST is supposed to prevent | high |
 
 ## 13. Interface change process
 1. `crates/kernel-sched`'s public items are an interface between the kernel and its own logic; changes

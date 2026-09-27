@@ -14,15 +14,19 @@
 
 extern crate alloc;
 
+mod gdt;
 mod heap;
 mod idt;
+mod lock;
 mod logging;
 mod memory;
+mod pic;
+mod sched;
 mod serial;
 
 use boot_info::{
     BootInfo, EXIT_VALUE_KERNEL_FAILURE, EXIT_VALUE_KERNEL_FAULT, EXIT_VALUE_KERNEL_MEMORY_FAILURE,
-    qemu_exit_code,
+    EXIT_VALUE_KERNEL_SCHED_FAILURE, qemu_exit_code,
 };
 // 注入模式下不会走到"正常结束"，因此该常量仅在非注入构建中使用
 #[cfg(not(feature = "inject-fault"))]
@@ -31,6 +35,9 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use logging::{kerror, kinfo, kwarn};
 
 use serial::Serial;
+
+/// 栈金丝雀：写在每段内核栈（线程栈、IST 栈）的最低 8 字节，回收时检查。
+const STACK_CANARY: u64 = 0x5061_7261_6E75_6B02;
 
 /// panic 处理器拿不到 `BootInfo`，因此入口处把退出端口存进这里。
 static EXIT_PORT: AtomicU32 = AtomicU32::new(0);
@@ -181,6 +188,128 @@ pub extern "C" fn kernel_main(boot_info: &BootInfo) -> ! {
         heap_stats.free_blocks
     );
 
+    // 8. M3a：描述符表、中断基础设施与调度器。
+    //
+    //    顺序不能换：先拿到 IST 栈，再装 GDT/TSS（IST 地址写在 TSS 里），然后重新装一次
+    //    IDT（这次 #DF/NMI 才带上 IST 索引），最后才重映射 PIC、编好 PIT、开中断。
+    let ist = match memory::alloc_frames(2) {
+        Some(range) => range,
+        None => {
+            kerror!("sched init FAILED: 无法为 IST 栈分配 2 个页帧");
+            finish(EXIT_VALUE_KERNEL_SCHED_FAILURE);
+        }
+    };
+    // 两个 IST 栈各一页：IST1（#DF）用第一页、IST2（NMI）用第二页；页首写金丝雀。
+    let (ist_df_top, ist_nmi_top) = (ist.start + 4096, ist.start + 8192);
+    // SAFETY: 这两页刚由页帧分配器发出且恒等映射，写 8 字节金丝雀不会碰到别人。
+    unsafe {
+        core::ptr::write_volatile(ist.start as *mut u64, STACK_CANARY);
+        core::ptr::write_volatile((ist.start + 4096) as *mut u64, STACK_CANARY);
+    }
+    // SAFETY: 单核、中断关闭、只调用一次。
+    if let Err(err) = unsafe { gdt::install(ist_df_top, ist_nmi_top) } {
+        kerror!("gdt init FAILED: {err}");
+        finish(EXIT_VALUE_KERNEL_SCHED_FAILURE);
+    }
+    kinfo!(
+        "gdt: GDT/TSS 已装载（CS=0x{:X} SS=0x{:X}，TSS=0x{:X}，IST1=0x{:X}，IST2=0x{:X}）",
+        gdt::current_cs(),
+        gdt::current_ss(),
+        gdt::tss_address(),
+        gdt::ist_top(gdt::IST_DOUBLE_FAULT),
+        gdt::ist_top(gdt::IST_NMI)
+    );
+    // 重新安装 IDT：现在 TSS 已装载，#DF/NMI 的门可以安全地带 IST 索引。
+    // SAFETY: 单核；只是把同样的门重写一遍。
+    unsafe { idt::install() };
+
+    if !memory::cr4_osfxsr() {
+        kerror!("sched init FAILED: CR4.OSFXSR = 0，fxsave/fxrstor 不可用");
+        finish(EXIT_VALUE_KERNEL_SCHED_FAILURE);
+    }
+    // SAFETY: 单核、中断关闭；IDT 已就绪，所有 IRQ 默认屏蔽。
+    let divisor = unsafe { pic::init() };
+    kinfo!(
+        "pic: 8259 已重映射到 0x20..0x2F，PIT 分频 {divisor}（{} Hz），只放行 IRQ0",
+        pic::TIMER_HZ
+    );
+    if let Err(err) = sched::init_boot() {
+        kerror!("sched init FAILED: {err}");
+        finish(EXIT_VALUE_KERNEL_SCHED_FAILURE);
+    }
+    sched::log_ready(1);
+
+    // 故障注入（仅测试）：制造**真正的**双重故障，验证它落在 IST1 栈上并打印完整诊断。
+    // 做法是把 #PF 与 #GP 的门改坏，再访问未映射地址：交付 #PF 失败 → 交付 #GP 也失败 → #DF。
+    // 如果 IST 配置错了，这里会是三重故障重启（超时），而不是一条诊断。
+    #[cfg(feature = "inject-double-fault")]
+    {
+        kinfo!("[inject] 改坏 #PF/#GP 的门后访问未映射地址，制造真正的双重故障");
+        // SAFETY: 只改两个门的选择子；紧接着访问未映射地址，处理器报告后永不返回。
+        unsafe {
+            idt::corrupt_gate_for_injection(13);
+            idt::corrupt_gate_for_injection(14);
+            core::ptr::read_volatile(core::ptr::null::<u8>());
+        }
+    }
+
+    // 9. 开中断，验证时钟真的在走（M3a 只记账，不切换）。
+    // SAFETY: 此刻 GDT/TSS/IST、IDT、PIC/PIT、调度器都已就绪；页帧/堆的锁已经就位。
+    unsafe { lock::enable_interrupts() };
+    let ticks = match sched::wait_for_ticks(3) {
+        Some(ticks) => ticks,
+        None => {
+            kerror!("sched self-check FAILED: 等待 3 次时钟中断超时（PIT 或 IRQ0 未生效）");
+            finish(EXIT_VALUE_KERNEL_SCHED_FAILURE);
+        }
+    };
+    // 关中断，准备报告：退出协议要求"报告前先关中断"（文档 §9.3）。
+    let _quiet = lock::critical();
+    let sched_stats = sched::stats();
+    kinfo!(
+        "timer: 观察到 {ticks} 次 tick（{} 次调度决策），中断已按退出协议关闭",
+        sched_stats.switches
+    );
+    // IST 栈的金丝雀：溢出会改写页首的金丝雀。
+    // SAFETY: 只读刚分配的页帧；仍在恒等映射内。
+    let canary_ok = unsafe {
+        core::ptr::read_volatile(ist.start as *const u64) == STACK_CANARY
+            && core::ptr::read_volatile((ist.start + 4096) as *const u64) == STACK_CANARY
+    };
+    if !canary_ok {
+        kerror!("sched self-check FAILED: IST 栈金丝雀被破坏（栈溢出）");
+        finish(EXIT_VALUE_KERNEL_SCHED_FAILURE);
+    }
+    // 页帧分配器的分配/释放往返：为 M3b 的线程栈回收先立好证据（此刻锁与中断都已生效）。
+    let free_before = memory::frames_free();
+    match memory::alloc_frames(1) {
+        Some(probe) => {
+            if let Err(err) = memory::free_frames(&probe) {
+                kerror!("sched self-check FAILED: 归还探测页帧失败（{err}）");
+                finish(EXIT_VALUE_KERNEL_SCHED_FAILURE);
+            }
+        }
+        None => {
+            kerror!("sched self-check FAILED: 无法分配探测页帧");
+            finish(EXIT_VALUE_KERNEL_SCHED_FAILURE);
+        }
+    }
+    if memory::frames_free() != free_before {
+        kerror!(
+            "sched self-check FAILED: 页帧分配/释放往返没有回到原值（{free_before} -> {}）",
+            memory::frames_free()
+        );
+        finish(EXIT_VALUE_KERNEL_SCHED_FAILURE);
+    }
+
+    if lock::held_count() != 0 {
+        kerror!(
+            "sched self-check FAILED: 报告时仍持有 {} 把锁",
+            lock::held_count()
+        );
+        finish(EXIT_VALUE_KERNEL_SCHED_FAILURE);
+    }
+
     kinfo!("self-check OK");
 
     // 故障注入（仅测试）：验证异常处理器路径。`ud2` 触发 #UD(6)。
@@ -211,6 +340,8 @@ fn probe_null_page() -> bool {
 ///
 /// 退出码取自 `crates/boot-info`（33/35/37/39/41），避免两侧各写一份魔数。
 pub(crate) fn finish(value: u8) -> ! {
+    // 退出协议（threads_and_scheduling.md §9.3）：报告之前先关中断，避免时钟在报告途中插入。
+    let _quiet = lock::critical();
     let port = EXIT_PORT.load(Ordering::Relaxed);
     if port == 0 {
         kinfo!("未启用调试退出，进入 hlt 停机");

@@ -28,6 +28,7 @@ use kernel_memory::paging::{self, BuildError, PageTables, PagingConfig};
 use alloc::vec::Vec;
 
 use crate::heap;
+use crate::lock::SpinLock;
 
 /// 页表竞技场的页数：4 GiB 上限下是 7 页 = 28 KiB（有单元测试钉住）。
 const ARENA_PAGES: usize = paging::tables_needed(paging::MAX_IDENTITY_BYTES, paging::BLOCK_SIZE);
@@ -66,12 +67,10 @@ unsafe impl Sync for FrameBitmap {}
 static FRAME_BITMAP: FrameBitmap = FrameBitmap(UnsafeCell::new([0u8; FRAME_BITMAP_BYTES]));
 
 /// 页帧分配器本体。
-struct FrameAllocatorCell(UnsafeCell<Option<FrameAllocator<'static>>>);
-
-// SAFETY: 见 `FrameBitmap`；分配器的每次使用都在单核、不可重入的执行流里。
-unsafe impl Sync for FrameAllocatorCell {}
-
-static FRAME_ALLOCATOR: FrameAllocatorCell = FrameAllocatorCell(UnsafeCell::new(None));
+///
+/// M3 起中断是开的，M3b 的线程创建/回收会在任意时刻调用它，因此用中断安全自旋锁保护
+/// ——这正是 M2 决策 #20 留下的前置条件（见 `memory_subsystem.md` §5.4）。
+static FRAME_ALLOCATOR: SpinLock<Option<FrameAllocator<'static>>> = SpinLock::new(None);
 
 /// 取内核堆**之前**的空闲页帧数，自检用它核对"堆恰好消耗了多少帧"。
 static FREE_FRAMES_AFTER_INIT: AtomicU64 = AtomicU64::new(0);
@@ -260,34 +259,35 @@ pub unsafe fn init_allocators(
         &FrameConfig::new(limit.min(paging::MAX_IDENTITY_BYTES)),
     )?;
     // 记下"取堆之前"的空闲页帧数：自检要用它核对堆恰好消耗了 HEAP_SIZE / PAGE_SIZE 帧。
-    FREE_FRAMES_AFTER_INIT.store(allocator.stats().free, Ordering::Relaxed);
-    // SAFETY: 同上：独占写入静态槽位一次。
-    unsafe { *FRAME_ALLOCATOR.0.get() = Some(allocator) };
+    // 注意顺序：先把统计读出来，再把分配器移进静态槽位。
+    let stats_before_heap = allocator.stats();
+    FREE_FRAMES_AFTER_INIT.store(stats_before_heap.free, Ordering::Relaxed);
+    *FRAME_ALLOCATOR.lock() = Some(allocator);
 
     // 2. 内核堆：一段连续页帧，接上全局分配器。
     let heap_frames = heap::HEAP_SIZE / paging::PAGE_SIZE as usize;
-    // SAFETY: 单核、中断关闭，且不与上面的借用重叠。
-    let allocator = unsafe { frame_allocator() };
-    let region =
-        allocator
-            .alloc_contiguous(heap_frames)
-            .ok_or(MemoryError::HeapRegionUnavailable {
-                frames: heap_frames,
-            })?;
+    let region = alloc_frames(heap_frames).ok_or(MemoryError::HeapRegionUnavailable {
+        frames: heap_frames,
+    })?;
     // SAFETY: 该区间来自页帧分配器且已被恒等映射；只初始化一次。
     unsafe { heap::init(region.start, heap::HEAP_SIZE) };
 
     Ok(MemoryLayout {
         limit,
-        frames: allocator.stats(),
+        frames: FrameStats {
+            managed: stats_before_heap.managed,
+            free: frames_free(),
+        },
         heap: (region.start, heap::HEAP_SIZE),
     })
 }
 
 /// 页帧分配器的自检（文档 §6.4 第 6 步）。
 fn frame_self_check(boot_info: &BootInfo) -> Result<(), MemoryError> {
-    // SAFETY: 单核、中断关闭，且与初始化路径不重叠。
-    let allocator = unsafe { frame_allocator() };
+    let mut allocator = FRAME_ALLOCATOR.lock();
+    let allocator = allocator
+        .as_mut()
+        .expect("页帧分配器尚未初始化：init_allocators 必须先于任何使用者调用");
 
     // 两次分配必须落在不同页帧上。这是唯一能抓住"重复分配"（页帧分配器最危险的 bug）
     // 的检查，也是 `inject-memory-fault` 特意要触发的失败。
@@ -509,14 +509,47 @@ const BLOCK_COUNT: usize = 64;
 /// 图案种子。
 const PATTERN_SEED: u8 = 0xA5;
 
-/// 页帧分配器本体。
+/// 从页帧分配器取一段连续页帧（M3 用它分配线程栈与 IST 栈）。
 ///
-/// # Safety
-/// 单核、中断关闭，且调用方不得与另一次借用重叠。
-unsafe fn frame_allocator() -> &'static mut FrameAllocator<'static> {
-    // SAFETY: 由调用方契约保证；尚未初始化时返回 None 视为内部错误（panic → 41）。
-    unsafe { (*FRAME_ALLOCATOR.0.get()).as_mut() }
+/// # Errors
+/// 页帧分配器尚未初始化、或找不到足够长的连续空闲区时返回 `None`。
+#[must_use]
+pub fn alloc_frames(count: usize) -> Option<kernel_memory::frame::PhysRange> {
+    let mut allocator = FRAME_ALLOCATOR.lock();
+    allocator
+        .as_mut()
         .expect("页帧分配器尚未初始化：init_allocators 必须先于任何使用者调用")
+        .alloc_contiguous(count)
+}
+
+/// 归还一段页帧。
+///
+/// # Errors
+/// 见 [`kernel_memory::frame::FreeError`]。
+pub fn free_frames(
+    range: &kernel_memory::frame::PhysRange,
+) -> Result<(), kernel_memory::frame::FreeError> {
+    let mut allocator = FRAME_ALLOCATOR.lock();
+    let allocator = allocator
+        .as_mut()
+        .expect("页帧分配器尚未初始化：init_allocators 必须先于任何使用者调用");
+    let mut address = range.start;
+    while address < range.end() {
+        allocator.free(kernel_memory::frame::PhysFrame::new(address))?;
+        address += paging::PAGE_SIZE;
+    }
+    Ok(())
+}
+
+/// 当前空闲页帧数。
+#[must_use]
+pub fn frames_free() -> u64 {
+    let allocator = FRAME_ALLOCATOR.lock();
+    allocator
+        .as_ref()
+        .expect("页帧分配器尚未初始化：init_allocators 必须先于任何使用者调用")
+        .stats()
+        .free
 }
 
 /// 内核自己拥有、绝不能被发放的物理区间（文档 §5.2 第 4 条）。
@@ -626,6 +659,8 @@ const CR4_PAE: u64 = 1 << 5;
 const CR4_LA57: u64 = 1 << 12;
 /// `CR4.PCIDE`：PCID 支持启用。
 const CR4_PCIDE: u64 = 1 << 17;
+/// `CR4.OSFXSR`：操作系统支持 `fxsave`/`fxrstor`（也意味着 SSE 可用）。
+const CR4_OSFXSR: u64 = 1 << 9;
 /// `EFER.LMA`：长模式已激活。
 const EFER_LMA: u64 = 1 << 10;
 /// `EFER` 的 MSR 编号。
@@ -639,6 +674,12 @@ fn read_cr0() -> u64 {
         core::arch::asm!("mov {}, cr0", out(reg) value, options(nomem, nostack, preserves_flags));
     }
     value
+}
+
+/// `CR4.OSFXSR`：`fxsave`/`fxrstor` 是否可用（M3 的时钟路径依赖它）。
+#[must_use]
+pub fn cr4_osfxsr() -> bool {
+    read_cr4() & CR4_OSFXSR != 0
 }
 
 /// 读取 `CR4`。

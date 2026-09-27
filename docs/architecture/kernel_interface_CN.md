@@ -255,6 +255,7 @@ QEMU 的 `isa-debug-exit` 退出码 = `(value << 1) | 1`。
 | **39** | **内核自检失败** —— 内核判定自己无法继续（magic/version 不匹配、内存图缺失、无 RSDP） | **内核** | 已实现（M0） |
 | **41** | **内核未处理异常或 panic** —— CPU 异常（`#UD`、`#GP`、`#PF` 等）或 `panic!` | **内核** | 已实现（M1） |
 | **43** | **内核内存初始化失败** —— 页表、页帧分配器或堆；见 [memory_subsystem_CN.md](memory_subsystem_CN.md) §7.1 | **内核** | 已实现（M2） |
+| **45** | **内核调度自检失败** —— 描述符表、中断、锁或线程；见 [threads_and_scheduling_CN.md](threads_and_scheduling_CN.md) §9.1 | **内核** | 已实现（M3a） |
 | 124 | 超时未退出（判为卡死） | — | 已实现（判失败） |
 
 **33 与 37 必须分开**：否则测试无法区分"引导器装完就停了"与"内核真的跑起来了"，
@@ -315,7 +316,7 @@ QEMU 的 `isa-debug-exit` 退出码 = `(value << 1) | 1`。
 |---|---|---|
 | M1 | 最小 IDT + panic 处理器 + 内核串口日志设施 —— **已完成** | M0 |
 | M2 | [memory_subsystem_CN.md](memory_subsystem_CN.md) —— 内核页表 + 物理页帧分配器（`LOADER_DATA` 视为已占用）+ 内核堆 —— **已完成**（M2a 见 PR #16，M2b 见 PR #17） | M1 |
-| M3 | **接口已定义：** [threads_and_scheduling_CN.md](threads_and_scheduling_CN.md) —— GDT/TSS/IST、8259 PIC + PIT、中断安全的锁、共享单一地址空间的内核线程、时钟抢占的轮转调度 | M2 |
+| M3 | [threads_and_scheduling_CN.md](threads_and_scheduling_CN.md) —— GDT/TSS/IST、8259 PIC + PIT、中断安全的锁、共享单一地址空间的内核线程、时钟抢占的轮转调度 —— **M3a 已完成**（PR #19）；M3b（上下文切换 + 线程）尚未开始 | M2 |
 | M4 | 第一个用户态服务（最小特权级切换，暂不定义 IPC 语义） | M3 |
 | M5 | IPC 消息格式 + 能力令牌语义（**此时才谈**，需要真实用户态进程作为约束） | M4 |
 

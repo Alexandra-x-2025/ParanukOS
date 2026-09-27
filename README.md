@@ -112,6 +112,12 @@ of them, asserts double frees are rejected and asserts the heap coalesces back t
 block. The interface is specified in
 [docs/architecture/memory_subsystem.md](docs/architecture/memory_subsystem.md).
 
+The kernel also brings up its own **GDT, TSS and IST stacks**, remaps the **8259 PIC** and programs
+the **PIT at 100 Hz** (port I/O only — no MMIO mapping is needed), wraps the heap and frame allocator in
+an interrupt-safe spinlock, and runs a **round-robin scheduler skeleton** whose pure logic lives in
+`crates/kernel-sched` (host-tested). M3a stops short of switching contexts: the timer counts ticks and
+proves a genuine double fault lands on the IST stack instead of triple-faulting.
+
 ### Tests
 
 ```bash
@@ -128,6 +134,8 @@ free block). 35 assertions, all of which must pass.
 
 ### Known limitations
 
+*   **Milestones 0–3a only.** The kernel has no threads yet: the timer ticks, but nothing is
+    preempted (M3b adds the context switch, threads and reaping).
 *   **Milestones 0–2 only.** The bootloader loads the kernel, calls `exit_boot_services` and jumps to
     the entry point; the kernel validates `BootInfo`, installs its own IDT and page tables, brings up
     the frame allocator and heap, prints a summary on COM1 and exits. There is **no user mode, no IPC
@@ -139,6 +147,9 @@ free block). 35 assertions, all of which must pass.
     alone until reusing it is measured.
 *   Only `ET_EXEC` kernel images are accepted; a PIE (`ET_DYN`) kernel would require relocation
     handling that is not implemented.
+*   Interrupts are on from M3a, so the kernel is preemptible in principle but nothing switches yet;
+    the lock discipline ("never yield while holding a lock", "never allocate in an ISR") is already
+    in place and checked.
 *   The kernel maps memory but does not use demand paging, W^X or per-process address spaces, and it
     deliberately does **not** map MMIO: it drives serial as port I/O and touches no MMIO device yet.
 

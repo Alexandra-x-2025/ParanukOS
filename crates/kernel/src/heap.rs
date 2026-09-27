@@ -8,9 +8,10 @@
 //! 并发：没有锁。单核、中断关闭是前置条件（文档 §5.4）；启用中断或第二个核之前必须先加锁。
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::cell::UnsafeCell;
 use core::ptr;
 use kernel_memory::heap::{FreeList, HeapStats};
+
+use crate::lock::SpinLock;
 
 /// 内核堆大小：256 个连续页帧 = 1 MiB。
 pub const HEAP_SIZE: usize = 1024 * 1024;
@@ -26,62 +27,52 @@ struct HeapState {
 }
 
 /// 全局分配器的内部状态。
-struct KernelHeap(UnsafeCell<HeapState>);
-
-// SAFETY: 单核、中断关闭（本里程碑的前置条件），每次分配/释放都在同一条不可重入的执行流里
-// 完成。启用中断或多核之前必须先加锁，否则这里就是不安全的。
-unsafe impl Sync for KernelHeap {}
+///
+/// M3 起中断是开的，堆会被普通线程与（理论上）中断上下文共同使用，因此状态必须由
+/// 中断安全自旋锁保护——这正是 M2 决策 #20 留下的前置条件。
+struct KernelHeap {
+    state: SpinLock<HeapState>,
+}
 
 impl KernelHeap {
     const fn new() -> Self {
-        Self(UnsafeCell::new(HeapState {
-            list: FreeList::empty(),
-            base: 0,
-            len: 0,
-        }))
+        Self {
+            state: SpinLock::new(HeapState {
+                list: FreeList::empty(),
+                base: 0,
+                len: 0,
+            }),
+        }
     }
 
     /// 在 `[base, base + len)` 上初始化堆。
     ///
     /// # Safety
-    /// 单核、中断关闭；该区间必须已映射可写，且只调用一次。
+    /// 该区间必须已映射可写，且只调用一次。
     unsafe fn init(&self, base: u64, len: usize) {
-        // SAFETY: 由调用方契约保证独占访问。
-        let state = unsafe { &mut *self.0.get() };
-        // SAFETY: 由调用方契约保证该物理区间可读写；它是恒等映射的。
+        let mut state = self.state.lock();
+        // SAFETY: 由调用方契约保证该物理区间可读写；它是恒等映射的，且我们持有锁。
         let arena = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, len) };
         state.list = FreeList::init(arena);
         state.base = base;
         state.len = len;
     }
 
-    /// 取出 `&mut` 状态。
-    ///
-    /// # Safety
-    /// 调用方必须保证当下没有别的代码持有该引用（单核、不可重入）。
-    #[allow(clippy::mut_from_ref)]
-    unsafe fn state(&self) -> &mut HeapState {
-        // SAFETY: 由调用方契约保证。
-        unsafe { &mut *self.0.get() }
-    }
-
     /// 堆区间 `(base, len)`。
     fn region(&self) -> (u64, usize) {
-        // SAFETY: 只读，且 `base`/`len` 在初始化后不再改变。
-        let state = unsafe { &*self.0.get() };
+        let state = self.state.lock();
         (state.base, state.len)
     }
 }
 
 unsafe impl GlobalAlloc for KernelHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: 由 GlobalAlloc 契约与单核、不可重入的前置条件保证独占访问。
-        let state = unsafe { self.state() };
+        let mut state = self.state.lock();
         if state.len == 0 || state.base == 0 {
             return ptr::null_mut();
         }
         // SAFETY: 堆区间在初始化时已确认可读写；这里只在**空闲块元数据**所在的字节上操作，
-        // 已交给调用方的内存不会被本分配器再次触碰。
+        // 已交给调用方的内存不会被本分配器再次触碰，而且我们持有堆锁。
         let arena = unsafe { core::slice::from_raw_parts_mut(state.base as *mut u8, state.len) };
         match state.list.alloc(arena, layout.size(), layout.align()) {
             Some(offset) => (state.base + offset as u64) as *mut u8,
@@ -90,8 +81,7 @@ unsafe impl GlobalAlloc for KernelHeap {
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, _layout: Layout) {
-        // SAFETY: 同 `alloc`。
-        let state = unsafe { self.state() };
+        let mut state = self.state.lock();
         if state.len == 0 || state.base == 0 || pointer.is_null() {
             return;
         }
@@ -123,8 +113,7 @@ pub unsafe fn init(base: u64, len: usize) {
 /// 堆统计信息。
 #[must_use]
 pub fn stats() -> HeapStats {
-    // SAFETY: 只读统计；`list` 只在单核、不可重入的分配/释放路径里被修改。
-    unsafe { (&*KERNEL_HEAP.0.get()).list.stats() }
+    KERNEL_HEAP.state.lock().list.stats()
 }
 
 /// 堆区间 `(起始物理地址, 长度)`。
