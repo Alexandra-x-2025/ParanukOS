@@ -239,12 +239,26 @@ it, and puts that page's **physical address** in `rdi`. This way:
 | Firmware GDT / IDT | ❌ No longer valid. Until the kernel installs its own IDT, any exception or interrupt can cause a triple-fault reset |
 | Page tables | ⚠️ Usually still an identity mapping, but **not guaranteed** |
 
-> ⚠️ **Observed during M1 development:** with the kernel grew and the timing shifted, `BootInfo`'s
-> first word was intermittently overwritten (4 bytes) before the kernel validated it. The window
-> between the exit call and `cli` is the prime suspect, which is why step 8 above disables
-> interrupts immediately. The corruption could not be reproduced deterministically, so this is a
-> hardening, not a proven fix; the kernel's `BootInfo` validation is what turns it into a clear
-> error (39) instead of silent misbehaviour.
+> ⚠️ **Observed during M1 development, refined during M3a:** `BootInfo`'s first word is
+> intermittently overwritten (exactly 4 bytes, at offset 0) before the kernel validates it. Step 8
+> above (disable interrupts immediately) is a hardening, not a proven fix.
+>
+> During M3a the same corruption reproduced as a **six-run streak** and then vanished for three
+> runs on a byte-identical kernel and loader. A probe that read the word as the *first* Rust
+> statement of `kernel_main` already saw the corrupted value, i.e.:
+>
+> * the loader's `write(info)`, its `cli`, and `jump_to_kernel` all completed;
+> * nothing in the kernel had run yet except its compiler-generated prologue;
+> * consequently the writer is in the window **[`write(info)` … first kernel instruction]**, or it is
+>   not maskable at all (SMI runs regardless of `IF`), and adding `read_volatile` probes to that
+>   window made it disappear — the classic timing/layout dependence.
+>
+> Only offset 0 (the low half of `magic`) is affected; `version`/`size`/`mmap_ptr`/`mmap_len` are
+> all correct, so it is a single 4-byte store, not a stray DMA-length copy. The kernel's `BootInfo`
+> validation is what turns it into a clear error (39) instead of silent misbehaviour. Whoever picks
+> this up next should start by having the loader re-read `magic` immediately before the jump (and
+> stash the observation in the `BootInfo` page's spare bytes), which distinguishes "the store never
+> landed" from "something wrote after it".
 
 ### 6.3 Memory ownership after handoff
 The kernel's physical allocator **must treat `LOADER_DATA` as in use**. At minimum that covers: the

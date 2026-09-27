@@ -133,6 +133,11 @@ pub fn critical() -> CriticalSection;             // cli, remember whether IF wa
 pub fn held_count() -> usize;
 ```
 
+The kernel is compiled with `-C no-redzone=yes` (`.cargo/config.toml`): the SysV red zone lets a
+callee keep data in the 128 bytes below `rsp`, and an interrupt's pushed frame lands exactly there.
+From M3 on interrupts are enabled, so leaving the red zone on would mean the timer silently
+corrupting live locals.
+
 The order matters: **disable interrupts first, then acquire the flag.** The reverse order leaves a
 window in which the interrupt handler could observe the lock as taken by a thread that has not
 actually entered the critical section yet.
@@ -482,6 +487,8 @@ and for the injected double fault:
 | 35 | Injections: `inject-no-preempt` → 45 and `inject-double-fault` → 41 | both reachable from `tests/smoke.sh` | the two claims most worth falsifying are "the timer really preempts" and "a `#DF` lands on IST instead of triple-faulting" | high |
 | 36 | The `#DF` injection is a **genuine** double fault (corrupt the `#PF`/`#GP` gate selectors, then touch an unmapped address), not `int $8` | complete, trustworthy frame in the diagnostic | a software `int n` pushes no error code, so `int $8` misparses the frame and prints garbage — the claim would then be "proven" by an exit code alone | high |
 | 37 | The IDT is installed twice: once early (M1, every gate on the current stack) and again after the TSS is loaded, when the `#DF`/NMI gates are armed with their IST indices | IST gates only exist once a valid task register does | an IST gate without a loaded TSS escalates to a triple fault, which is exactly what IST is supposed to prevent | high |
+| 38 | One stack shape for every switch: `yield`/`exit` are software interrupts and all switching happens through the interrupt frame (§14.2) | `Context.rsp` always points at an `IrqFrame`; the `switch(from,to)` primitive is deleted | the cooperative and interrupt paths would otherwise leave different frames at `Context.rsp`, and the scheduler may resume any thread from either path — the mismatch corrupts every register | medium (it is an ABI) |
+| 39 | Per-thread 16-byte-aligned FXSAVE areas in the kernel table, saved/restored only on a real switch (§14.3) | 512 bytes per thread (8 KiB total); `irq_common` loses its alignment dance | the stack variant couples the frame offset to the interrupted `rsp` alignment; M3a only works because kernel code happens to keep `rsp ≡ 8 (mod 16)` | high |
 
 ## 13. Interface change process
 1. `crates/kernel-sched`'s public items are an interface between the kernel and its own logic; changes
@@ -493,3 +500,149 @@ and for the injected double fault:
 4. Bilingual docs: every change must update both this file and
    [threads_and_scheduling_CN.md](threads_and_scheduling_CN.md) (AGENTS.md rule 4).
 5. Implementation status: after each part, update §11 and the M3 row of `kernel_interface.md` §9.
+
+## 14. M3b annex: pinned ABI (supersedes parts of §7)
+
+### 14.1 Why this annex exists
+§6–§8 fix the design of threads and scheduling. Preparing to write the assembly surfaced two defects
+that only show up once the exact bytes are pinned down. This annex fixes them, states what it
+supersedes, and defines every constant, offset and call contract that `thread.rs`, `idt.rs` and the
+scheduler glue must agree on. Sections 1–13 stay valid except where this section says otherwise.
+
+### 14.2 Defect 1: two stack shapes (supersedes §7.2 and §7.3)
+§7.2 described a `switch(from, to)` push/pop primitive for `yield`, and a separate interrupt path for
+the timer. Those paths leave **different things at `Context.rsp`**:
+
+* the cooperative path pushes 6 callee-saved registers plus a return address;
+* the interrupt path leaves a full `IrqFrame` (15 GPRs + vector + error code + `rip/cs/rflags/rsp/ss`).
+
+The scheduler must be free to pick *any* ready thread, from either path: a thread that yielded
+cooperatively and is later chosen by the timer would be resumed by the interrupt epilogue and pop
+garbage into its registers. The two shapes are therefore not a detail — they are a defect.
+
+**Decision [38]: there is only one shape. Every context switch happens through the interrupt frame.**
+
+* `yield()` is the instruction `int 0x30`; `exit()` is `int 0x31`; the timer is `IRQ0 → 0x20`.
+* All three vectors share `idt.rs`'s `irq_common`, which already exists from M3a with a ready-made
+  return protocol: the handler returns `0` to resume the interrupted thread, or **the `rsp` of the
+  incoming thread's saved frame** to switch to it.
+* `Context.rsp` therefore always points at an `IrqFrame`. The `switch(from, to)` primitive of §7.2 is
+  **deleted**; a switch is nothing more than "the handler stores the outgoing frame's address in the
+  outgoing context, loads the incoming context's `rsp`, and returns it".
+* Consequence: a switch is only possible from inside an interrupt gate, so **`IF = 0` for the whole
+  switch by construction**. §5.3's "who restores `IF`" discussion becomes automatic: the `iretq`
+  restores it from the frame that resumes.
+* `exit()` marks the current thread `Exited` and switches away; it never returns, and the thread's
+  stack is only freed afterwards, by whichever thread the scheduler hands the reaping to (§8.3).
+
+### 14.3 Defect 2: FXSAVE on the stack couples the frame offset to `rsp` alignment (supersedes §7.5)
+§7.5 (and decision #27) put the XMM state on the thread's own stack, immediately below the saved
+frame. `fxsave` requires a 16-byte-aligned destination, and the interrupted `rsp` is only known at
+runtime, so the stub must align dynamically — which makes the distance between the FXSAVE area and
+the frame **variable** (it depends on the interrupted `rsp & 15`). M3a's `irq_common` happens to work
+because kernel code keeps `rsp ≡ 8 (mod 16)` at instruction boundaries, which makes the alignment
+step a no-op; that is luck, not a contract.
+
+**Decision [39]: each thread owns a 512-byte, 16-byte-aligned FXSAVE area in the kernel's per-thread
+table, and the FX state is saved/restored only when a switch actually happens.**
+
+* `irq_common` loses its `fxsave`/`fxrstor`/alignment dance: push 15 GPRs, `mov rdi, rsp`, call the
+  handler, load `rsp` from the returned value if non-zero, pop 15 GPRs, skip vector+error, `iretq`.
+* the handler, once it has decided on `Switch { from, to }`, runs
+  `fxsave [current.fx]` then `fxrstor [next.fx]` — two instructions, only on real switches (a tick
+  that keeps the same thread touches nothing).
+* a new thread's area is pre-initialised: zeroed, with `FCW = 0x037F` (offset 0) and
+  `MXCSR = 0x1F80` (offset 24), which is the architectural default.
+* this is strictly simpler *and* cheaper than the stack variant; the cost is 512 bytes per thread
+  (`MAX_THREADS = 16` → 8 KiB), which the kernel table has room for.
+
+### 14.4 Pinned constants
+
+| Constant | Value | Note |
+|---|---|---|
+| `MAX_THREADS` | 16 | `kernel-sched` table size |
+| `THREAD_STACK_PAGES` | 4 (16 KiB) | per thread; canary at the lowest 8 bytes, no guard page (§6.2) |
+| `IDLE_STACK_PAGES` | 4 | same allocation path |
+| `STACK_CANARY` | `0x5061_7261_6E75_6B02` | "Paranuk" + interface 2 |
+| `TIMER_VECTOR` / `YIELD_VECTOR` / `EXIT_VECTOR` | `0x20` / `0x30` / `0x31` | timer needs EOI, the other two do not |
+| `TIMER_HZ` | 100 | PIT divisor 11932 → 99.9984 Hz (§4.1) |
+| `PREEMPTION_TICK_BUDGET` | 500 ticks (≈5 s) | bounded wait in §10 step 3; exhausting it is a clean 45, never a hang |
+| self-check sizes | 64 blocks / 10 rounds / 4×2000 increments | §10 steps 1–6 |
+
+### 14.5 `Context` and the crafted frame
+
+```rust
+#[repr(C)]
+pub struct Context {
+    pub rsp: u64,     // 指向该线程保存的 IrqFrame（永远是 IrqFrame，§14.2）
+    pub thread: u32,  // 自检与诊断
+    pub _pad: u32,
+}
+```
+
+The frame a **new** thread starts from is built on its own stack, at the highest usable address, and
+must contain (this is `IrqFrame` field by field, low to high):
+
+| Field | Value |
+|---|---|
+| `r15..r8`, `rbp`, `rbx`, `rdx`, `rcx`, `rax` | `0` |
+| `rdi` | the thread's **entry function pointer** (it arrives as the trampoline's first argument) |
+| `rsi` | the thread's `ThreadId` (second argument, for logging and for `exit`) |
+| `vector` | `YIELD_VECTOR` (any value works; it only labels the frame) |
+| `error_code` | `0` |
+| `rip` | `thread_trampoline` |
+| `cs` / `ss` | `0x08` / `0x10` (§3) |
+| `rflags` | `0x202` — bit 1 (reserved, always 1) **and `IF = 1`**, so `iretq` starts the thread with interrupts enabled |
+| `rsp` | `stack_top − 8`, so that `thread_trampoline`'s entry satisfies `rsp % 16 == 8` exactly as if it had been `call`ed |
+
+`thread_trampoline` is therefore a plain `extern "C" fn(entry: extern "C" fn(), id: u64) -> !`: it
+calls `entry()` and, if that ever returns, calls `exit()`.
+
+### 14.6 The switch protocol, end to end
+1. a thread runs; the timer fires (or the thread executes `int 0x30` / `int 0x31`);
+2. `irq_common` pushes the 15 GPRs and calls `irq_handler(frame, )`;
+3. the handler takes the scheduler's critical section (`IF` is already 0 inside the gate), updates the
+   scheduler, and gets `Keep` or `Switch { from, to }`;
+4. on `Switch`: `from.rsp = frame as u64`; save the current FX area of `from` and load `to`'s;
+   return `to.rsp`;
+5. `irq_common` sees a non-zero return, does `mov rsp, rax`, and runs the shared epilogue;
+6. the incoming thread resumes inside whichever gate it was switched out through — `iretq` restores
+   its `rflags` (and with it `IF`), `cs`, `rip` and `rsp`, so it continues exactly where it stopped;
+7. the timer path additionally EOIs IRQ0 before step 5 (a lost EOI means exactly one tick, §11.4);
+8. after any switch, the incoming thread reaps `Exited` threads (§8.3): it frees their stacks
+   ((`frame`-independent) frame ranges recorded at creation) and resets the slots.
+
+### 14.7 `yield`/`exit` call contract
+* `yield()` asserts `held_count() == 0` (a lock held across a switch is a single-core deadlock, §5.4)
+  and then executes `int 0x30`; it returns normally when the thread is resumed;
+* `exit()` executes `int 0x31`; the handler marks the calling thread `Exited` and never returns to it;
+* both are forbidden from interrupt handlers (§4.3) and are `unsafe` only in the sense that the
+  scheduler state must be consistent — the wrappers themselves are safe functions.
+
+### 14.8 What M3b changes in M3a's code
+| M3a as shipped | M3b |
+|---|---|
+| `irq_common` does `and rsp,-16; sub rsp,512; fxsave` and the symmetric epilogue | those five instructions are removed (§14.3); the stub becomes 15 pushes + `call` + conditional `mov rsp` + 15 pops + `iretq` |
+| `irq_handler` returns `0` unconditionally, ticks only | returns the incoming thread's `rsp` on a switch; three vectors instead of one |
+| `sched::on_tick(false)` (count only) | `on_tick(true)`; the decision is acted on |
+| no threads are created | `create`/`exit`/`yield`/reaping, the idle thread, the self-check |
+
+## 15. M3b self-check, exactly as it must be asserted
+
+Numeric detail for §10, so the implementation is mechanical and the log is falsifiable:
+
+1. **mutual exclusion**: 4 threads × 2000 increments of one `AtomicU64`-free counter under a
+   dedicated `SpinLock`; the final value must be exactly `8000`.
+2. **round robin**: 3 threads × 10 rounds, each writing its id into a shared `[u8; 30]` under the same
+   lock and then yielding; the array must equal `012012…` (30 bytes, starting with `0`).
+3. **preemption**: thread A spins (no yield) on `PREEMPTED` until it is set by thread B *or* until
+   `PREEMPTION_TICK_BUDGET` ticks pass; A records the tick count when the flag arrives. Success means
+   the flag arrived **and** at least one tick elapsed while A was spinning; otherwise step 3 fails.
+4. **ticks moved**: `sched::stats().ticks` must be `> 0` and `switches > 0` at this point.
+5. **exit, reaping, accounting**: after every test thread exits, `live == 2` (boot + idle),
+   `ready == 0`, every canary intact, and `memory::frames_free()` back to the value captured before
+   the first `create`.
+6. **lock discipline**: `held_count() == 0` at every check point, and taking the test lock reports 1.
+
+`inject-no-preempt` makes step 3 fail cleanly (the handler still counts ticks but always returns
+`Keep`) → **45**.
