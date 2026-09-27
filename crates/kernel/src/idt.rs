@@ -18,7 +18,7 @@ use core::arch::{asm, naked_asm};
 use core::cell::UnsafeCell;
 use core::mem::size_of;
 
-use boot_info::EXIT_VALUE_KERNEL_FAULT;
+use boot_info::{EXIT_VALUE_KERNEL_FAULT, EXIT_VALUE_USER_FAILURE};
 
 use crate::kerror;
 
@@ -85,14 +85,16 @@ impl Gate {
         }
     }
 
-    /// 构造一个 ring 0 中断门，并指定 IST 索引（0 = 使用当前栈）。
-    const fn with_ist(handler: u64, selector: u16, ist: u8) -> Self {
+    /// 构造一个中断门，并指定 IST 索引与 DPL。
+    ///
+    /// `dpl = 3` 用于系统调用向量 0x40：只有允许 CPL 3 执行的 `int n` 才能从用户态进入内核。
+    const fn with_dpl(handler: u64, selector: u16, ist: u8, dpl: u8) -> Self {
         Self {
             offset_low: handler as u16,
             selector,
             ist,
-            // P=1, DPL=0, 类型=0b1110（64 位中断门）
-            type_attr: 0x8E,
+            // P=1、DPL、类型=0b1110（64 位中断门）
+            type_attr: 0x8E | ((dpl & 3) << 5),
             offset_mid: (handler >> 16) as u16,
             offset_high: (handler >> 32) as u32,
             reserved: 0,
@@ -222,6 +224,13 @@ impl FxSaveArea {
     }
 }
 
+impl Gate {
+    /// 构造一个 ring 0（DPL 0）中断门。
+    const fn with_ist(handler: u64, selector: u16, ist: u8) -> Self {
+        Self::with_dpl(handler, selector, ist, 0)
+    }
+}
+
 /// 读取当前 `CS`：`lgdt` 之后选择子仍是 `0x08`，因此这里读到的就是内核代码段。
 fn current_cs() -> u16 {
     let cs: u16;
@@ -331,9 +340,12 @@ irq_stub!(irq_47, 47);
 pub const YIELD_VECTOR: u8 = 0x30;
 /// 软件中断：线程退出。
 pub const EXIT_VECTOR: u8 = 0x31;
+/// 系统调用：**唯一**允许 CPL 3 执行的向量（`user_mode.md` §8）。
+pub const SYSCALL_VECTOR: u8 = 0x40;
 
 irq_stub!(isr_yield, YIELD_VECTOR);
 irq_stub!(isr_exit, EXIT_VECTOR);
+irq_stub!(isr_syscall, SYSCALL_VECTOR);
 
 /// IRQ 的公共入口：保存全部通用寄存器与 XMM，调用 Rust，然后（可能换栈）返回。
 ///
@@ -405,6 +417,12 @@ extern "C" fn isr_common() {
     );
 }
 
+/// 异常是否来自 CPL 3（用户态服务）。
+#[must_use]
+pub fn is_user_fault(frame: &ExceptionFrame) -> bool {
+    frame.cs & 3 == 3
+}
+
 /// 当前栈指针是否落在某个 IST 栈页内（自检证据：证明异常确实换到了 IST 栈）。
 #[must_use]
 pub fn current_stack_kind() -> &'static str {
@@ -469,6 +487,12 @@ extern "C" fn exception_handler(frame: &ExceptionFrame) -> ! {
         kerror!("  cr2=0x{cr2:X} (触发页错误的地址)");
     }
 
+    // CPL 3 的异常是"服务崩了"，不是"内核崩了"：区分开来，日志与退出码才诚实
+    // （user_mode.md §9，决策 #53）。
+    if is_user_fault(frame) {
+        kerror!("服务在 CPL 3 上发生异常（用户态故障，不是内核崩溃）");
+        crate::finish(EXIT_VALUE_USER_FAILURE)
+    }
     crate::finish(EXIT_VALUE_KERNEL_FAULT)
 }
 
@@ -557,6 +581,9 @@ pub unsafe fn install() {
     // DPL = 0：M3 只有内核态，用户态（M4）才需要允许 CPL 3 触发。
     idt.0[YIELD_VECTOR as usize] = Gate::with_ist(isr_yield as *const () as u64, selector, 0);
     idt.0[EXIT_VECTOR as usize] = Gate::with_ist(isr_exit as *const () as u64, selector, 0);
+    // 系统调用门是唯一 DPL = 3 的向量：用户态只能从这里进来。
+    idt.0[SYSCALL_VECTOR as usize] =
+        Gate::with_dpl(isr_syscall as *const () as u64, selector, 0, 3);
 
     let idtr = Idtr {
         limit: (size_of::<Idt>() - 1) as u16,

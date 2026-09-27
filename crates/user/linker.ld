@@ -11,8 +11,9 @@
 
 ENTRY(_start)
 
-USER_BASE  = 0x100000000;   /* 4 GiB */
-USER_DELTA = 0xFDFFF000;    /* paddr = vaddr - USER_DELTA，于是镜像装载在 0x02000000（32 MiB，RAM 内）*/
+USER_BASE  = 0x100000000;   /* 4 GiB：内核恒等映射的终点 */
+USER_TEXT  = 0x100001000;   /* 头部（FILEHDR）+ .text 的起点，比 USER_BASE 高一页 */
+USER_DELTA = 0xFE000000;    /* paddr = vaddr - USER_DELTA，于是镜像装载在 0x02000000（32 MiB，RAM 内）*/
 
 PHDRS
 {
@@ -22,7 +23,7 @@ PHDRS
 
 SECTIONS
 {
-    . = USER_BASE;
+    . = USER_TEXT;
 
     .text : AT(ADDR(.text) - USER_DELTA) ALIGN(4K) {
         *(.text .text.*)

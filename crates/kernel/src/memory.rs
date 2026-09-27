@@ -31,7 +31,12 @@ use crate::heap;
 use crate::lock::SpinLock;
 
 /// 页表竞技场的页数：4 GiB 上限下是 7 页 = 28 KiB（有单元测试钉住）。
-const ARENA_PAGES: usize = paging::tables_needed(paging::MAX_IDENTITY_BYTES, paging::BLOCK_SIZE);
+const KERNEL_TABLE_PAGES: usize =
+    paging::tables_needed(paging::MAX_IDENTITY_BYTES, paging::BLOCK_SIZE);
+/// 用户区额外需要的页表页数：1 张 PD + 最多 3 张 PT（覆盖 6 MiB 用户区，M4 足够）。
+const USER_TABLE_PAGES: usize = 4;
+/// 页表竞技场总页数：内核表 + 用户区表共用**同一个竞技场**，因此 `CR3` 不必切换（决策 #54）。
+const ARENA_PAGES: usize = KERNEL_TABLE_PAGES + USER_TABLE_PAGES;
 /// 页表竞技场的字节数。
 const ARENA_BYTES: usize = ARENA_PAGES * paging::PAGE_SIZE as usize;
 
@@ -508,6 +513,19 @@ const BLOCK_SIZES: [usize; 8] = [16, 33, 64, 129, 256, 1025, 4096, 7];
 const BLOCK_COUNT: usize = 64;
 /// 图案种子。
 const PATTERN_SEED: u8 = 0xA5;
+
+/// 页表竞技场：`(切片, PML4 偏移, 第一个空闲页偏移)`。
+///
+/// 用户区的新表就建在同一个竞技场里（`paging::build` 把 PML4 放在偏移 0，内核表紧随其后），
+/// 因此它们自动出现在当前 `CR3` 之下——M4 只有一个地址空间，不需要切换。
+///
+/// # Safety
+/// 返回一个指向静态存储的可变引用：单核、中断关闭，且调用方不得与另一次借用重叠。
+pub unsafe fn page_arena() -> (&'static mut [u8], usize, usize) {
+    // SAFETY: 由调用方契约保证。
+    let arena = unsafe { &mut *PAGE_ARENA.0.get() };
+    (arena, 0, KERNEL_TABLE_PAGES * paging::PAGE_SIZE as usize)
+}
 
 /// 从页帧分配器取一段连续页帧（M3 用它分配线程栈与 IST 栈）。
 ///

@@ -12,6 +12,7 @@
 #   41  内核发生未处理异常或 panic（意外崩溃）
 #   43  内核内存初始化失败（页表构建/安装、页帧分配器、内核堆）
 #   45  内核调度自检失败（GDT/TSS/IST、时钟中断、线程、锁）
+#   47  用户态服务故障（CPL 3 的异常，或被拒绝的系统调用参数）
 #   124 超时：应用没有主动退出（判失败）
 #
 # 退出码常量与 crates/boot-info 保持一致。
@@ -38,6 +39,7 @@ EXIT_KERNEL_FAILURE=39
 EXIT_KERNEL_FAULT=41
 EXIT_KERNEL_MEMORY_FAILURE=43
 EXIT_KERNEL_SCHED_FAILURE=45
+EXIT_USER_FAILURE=47
 
 WORK="$(mktemp -d)"
 ESP_DIR="$(mktemp -d)/esp"
@@ -249,6 +251,27 @@ else
 fi
 grep_log "$LOG_DIR/m0-positive.log" 'timer: 中断已按退出协议关闭' "报告前按退出协议关闭中断"
 
+# --- M4a：第一个用户态服务（user_mode.md §11.3） ---
+if grep -qE 'user: 镜像 0x[0-9A-F]+→0x[0-9A-F]+（[0-9]+ 页，U/S=1），栈 0x[0-9A-F]+，入口 0x[0-9A-F]+，页表 [0-9]+ 页' "$LOG_DIR/m0-positive.log"; then
+    ok "用户区已映射（U/S=1），入口与用户栈就位"
+else
+    bad "用户区映射日志缺失"
+    show_log "$LOG_DIR/m0-positive.log"
+fi
+# cs=0x2B 是 CPU 报的：证明服务**确实**在 CPL 3 上执行过，而不是内核自说自话
+if grep -qE 'user: 服务确实运行在 CPL 3（cs=0x2B，调用号 0xDEAD' "$LOG_DIR/m0-positive.log"; then
+    ok "服务在 CPL 3 上运行（cs=0x2B，哨兵调用号 0xDEAD）"
+else
+    bad "没有观察到来自 CPL 3 的系统调用"
+    show_log "$LOG_DIR/m0-positive.log"
+fi
+if grep -qE 'user: 自检 OK（cs=0x2B，运行期间 [1-9][0-9]* 次 tick，rsp0=0x[0-9A-F]+）' "$LOG_DIR/m0-positive.log"; then
+    ok "服务在用户态被时钟抢占过（tick 推进），且 rsp0 已按线程设置"
+else
+    bad "服务运行期间没有 tick 推进或 rsp0 未设置"
+    show_log "$LOG_DIR/m0-positive.log"
+fi
+
 # 映射规模必须覆盖测试虚拟机的主要内存（QEMU 默认 128 MiB，这里放宽到 64 MiB）
 mapped_mib="$(sed -n 's/.*个 2 MiB 大块（\([0-9]*\) MiB.*/\1/p' "$LOG_DIR/m0-positive.log" | head -1)"
 if [ -n "$mapped_mib" ] && [ "$mapped_mib" -ge 64 ]; then
@@ -345,6 +368,13 @@ boot_case "$WORK/loader.efi" "$WORK/KERNEL-df.ELF" "$LOG_DIR/m3a-double-fault.lo
 grep_log "$LOG_DIR/m3a-double-fault.log" '#DF 双重故障' "指认了向量（#DF 双重故障）"
 grep_log "$LOG_DIR/m3a-double-fault.log" '实际运行栈：IST1 栈' "直接证明异常换到了 IST1 栈（而不是三重故障）"
 grep_log "$LOG_DIR/m3a-double-fault.log" 'error_code=0x0' "帧格式完整（真正的 #DF 带错误码）"
+
+# --- J（暂缺）：inject-user-fault 变体在 4 GiB 下的重定位尚未解决 ---
+#
+# 它的 .rodata 引用需要 R_X86_64_64，而默认 small 代码模型发的是 R_X86_64_32S（超出 ±2 GiB）。
+# 打开 `-C code-model=large` 后链接能过，但普通构建的 ELF 反而变成"入口不落在可执行段内"，
+# 因此先回退，等这块单独查清后再补上这条反例（用户态故障路径本身已在真机验证：见内核日志
+# 里 "服务在 CPL 3 上发生异常" → 47）。
 
 # --- I. 故障注入：抢占被关闭 → 自旋线程拿不到标志 → 45（M3b） ---
 #

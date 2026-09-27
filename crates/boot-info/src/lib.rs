@@ -210,6 +210,10 @@ pub const EXIT_VALUE_KERNEL_MEMORY_FAILURE: u8 = 0x15;
 /// 与 41（内核崩溃）区分：41 是"内核自己崩了"，45 是"内核活着，但调度子系统没通过自检"。
 /// 依据 `docs/architecture/threads_and_scheduling.md` §9.1。
 pub const EXIT_VALUE_KERNEL_SCHED_FAILURE: u8 = 0x16;
+/// 写入值：用户态服务故障（CPL 3 的异常，或被拒绝的系统调用参数）。
+///
+/// 与 41（内核崩了）区分：服务有 bug 不能记成内核崩溃。依据 `docs/architecture/user_mode.md` §9。
+pub const EXIT_VALUE_USER_FAILURE: u8 = 0x17;
 
 /// QEMU 把写入 `isa-debug-exit` 的值转换为进程退出码：`(value << 1) | 1`。
 #[must_use]
@@ -231,6 +235,8 @@ pub const EXIT_CODE_KERNEL_FAULT: i32 = qemu_exit_code(EXIT_VALUE_KERNEL_FAULT);
 pub const EXIT_CODE_KERNEL_MEMORY_FAILURE: i32 = qemu_exit_code(EXIT_VALUE_KERNEL_MEMORY_FAILURE);
 /// 内核调度自检失败 → 45。
 pub const EXIT_CODE_KERNEL_SCHED_FAILURE: i32 = qemu_exit_code(EXIT_VALUE_KERNEL_SCHED_FAILURE);
+/// 用户态服务故障 → 47。
+pub const EXIT_CODE_USER_FAILURE: i32 = qemu_exit_code(EXIT_VALUE_USER_FAILURE);
 
 #[cfg(test)]
 mod tests {
@@ -413,6 +419,8 @@ mod tests {
         assert_eq!(EXIT_CODE_KERNEL_FAULT, 41);
         assert_eq!(EXIT_CODE_KERNEL_MEMORY_FAILURE, 43);
         assert_eq!(EXIT_CODE_KERNEL_SCHED_FAILURE, 45);
+        assert_eq!(EXIT_CODE_USER_FAILURE, 47);
+        assert_ne!(EXIT_CODE_KERNEL_FAULT, EXIT_CODE_USER_FAILURE);
         assert_ne!(EXIT_CODE_KERNEL_FAULT, EXIT_CODE_KERNEL_SCHED_FAILURE);
         assert_ne!(
             EXIT_CODE_KERNEL_MEMORY_FAILURE,

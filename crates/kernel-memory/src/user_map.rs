@@ -174,6 +174,17 @@ pub fn map_user_region(
             vaddr: pml4_offset as u64,
         });
     }
+    // **每一级**都必须带 U/S = 1，否则 CPL 3 的访问会在中间层就被拒（`#PF`，错误码的 P 位=1、
+    // U 位=1）。真正的可达性由**叶项**决定：内核恒等映射的 2 MiB 大块叶项是 U=0，所以即使中间层
+    // 允许用户访问，CPL 3 依然碰不到内核内存。
+    if pdpt_entry & USER == 0 {
+        write_entry_at(
+            arena,
+            pml4_offset,
+            0,
+            pdpt_entry | USER,
+        );
+    }
     let pdpt = ((pdpt_entry & ADDRESS_MASK) - address) as usize;
     let pdpt_index = ((USER_BASE >> 30) & 0x1FF) as usize;
     if read_entry_at(arena, pdpt, pdpt_index) & PRESENT != 0 {
@@ -199,7 +210,7 @@ pub fn map_user_region(
         arena,
         pdpt,
         pdpt_index,
-        (address + pd_offset as u64) | PRESENT | WRITABLE,
+        (address + pd_offset as u64) | PRESENT | WRITABLE | USER,
     );
 
     let mut pt_offsets = [0usize; PD_ENTRIES];
@@ -212,7 +223,7 @@ pub fn map_user_region(
             arena,
             pd_offset,
             next - (first_page + 1),
-            (address + table_offset as u64) | PRESENT | WRITABLE,
+            (address + table_offset as u64) | PRESENT | WRITABLE | USER,
         );
         next += 1;
     }
@@ -433,6 +444,36 @@ mod tests {
         assert_eq!(
             read_entry_at(arena_ref, pt1 as usize, 0) & ADDRESS_MASK,
             0x0400_0000
+        );
+    }
+
+    #[test]
+    fn every_level_of_the_chain_carries_the_user_bit() {
+        // 少了任何一级，CPL 3 的取指就会以"保护违例"失败（真机实测踩过）。
+        let mut arena = Arena::new();
+        let arena_ref = arena.bytes();
+        let (pml4, free) = kernel_tables(arena_ref);
+        let mapping = Mapping {
+            vaddr: USER_BASE,
+            paddr: 0x0200_0000,
+            size: PAGE,
+            writable: true,
+        };
+        map_user_region(arena_ref, pml4, free, &[mapping]).expect("映射成功");
+        let base = arena_ref.as_ptr() as u64;
+        let pml4_entry = read_entry_at(arena_ref, pml4, 0);
+        assert_eq!(pml4_entry & USER, USER, "PML4 项必须带 U/S = 1");
+        let pdpt = (pml4_entry & ADDRESS_MASK) - base;
+        let pdpt_entry = read_entry_at(arena_ref, pdpt as usize, 4);
+        assert_eq!(pdpt_entry & USER, USER, "PDPT 项必须带 U/S = 1");
+        let pd = (pdpt_entry & ADDRESS_MASK) - base;
+        let pd_entry = read_entry_at(arena_ref, pd as usize, 0);
+        assert_eq!(pd_entry & USER, USER, "PD 项必须带 U/S = 1");
+        let pt = (pd_entry & ADDRESS_MASK) - base;
+        assert_eq!(
+            read_entry_at(arena_ref, pt as usize, 0) & USER,
+            USER,
+            "PT 叶项必须带 U/S = 1"
         );
     }
 

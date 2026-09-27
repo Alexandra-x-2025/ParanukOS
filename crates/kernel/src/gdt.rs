@@ -16,6 +16,10 @@ pub const KERNEL_CODE: u16 = 0x08;
 pub const KERNEL_DATA: u16 = 0x10;
 /// TSS 选择子。
 pub const TSS_SELECTOR: u16 = 0x18;
+/// 用户代码段选择子（DPL 3）；帧里的 `cs` 用 `0x28 | 3`。
+pub const USER_CODE: u16 = 0x28;
+/// 用户数据段选择子（DPL 3）；帧里的 `ss` 用 `0x30 | 3`。
+pub const USER_DATA: u16 = 0x30;
 /// `#DF` 使用的 IST 索引（IST1）。
 pub const IST_DOUBLE_FAULT: u8 = 1;
 /// NMI 使用的 IST 索引（IST2）。
@@ -29,6 +33,8 @@ pub const IST_VECTOR_NMI: u8 = 2;
 const _: () = assert!(KERNEL_CODE == 0x08);
 const _: () = assert!(KERNEL_DATA == 0x10);
 const _: () = assert!(TSS_SELECTOR == 0x18);
+const _: () = assert!(USER_CODE == 0x28);
+const _: () = assert!(USER_DATA == 0x30);
 
 /// 64 位 TSS（104 字节）。
 #[repr(C, packed)]
@@ -93,6 +99,18 @@ const fn code_descriptor() -> u64 {
     0x00AF_9A00_0000_FFFF
 }
 
+/// 平坦用户代码段（DPL 3，`L = 1`）。
+const fn user_code_descriptor() -> u64 {
+    // access = 0xFA（P=1, DPL=3, S=1, 代码/可读）、flags = 0xAF（G=1, L=1）
+    0x00AF_FA00_0000_FFFF
+}
+
+/// 平坦用户数据段（DPL 3）。
+const fn user_data_descriptor() -> u64 {
+    // access = 0xF2（P=1, DPL=3, S=1, 数据/可写）、flags = 0xCF（G=1, D/B=1）
+    0x00CF_F200_0000_FFFF
+}
+
 /// 平坦数据段。
 const fn data_descriptor() -> u64 {
     // access=0x92（P=1,DPL=0,S=1,数据/可写）、flags=0xCF（G=1,D/B=1）
@@ -135,9 +153,9 @@ pub unsafe fn install(ist_double_fault: u64, ist_nmi: u64) -> Result<(), &'stati
         data_descriptor(),
         tss_low,
         tss_high,
-        0, // M4：用户代码
-        0, // M4：用户数据
-        0, // 保留
+        user_code_descriptor(), // 0x28：M4 用户代码（DPL 3）
+        user_data_descriptor(), // 0x30：M4 用户数据（DPL 3）
+        0,                      // 保留
     ];
 
     let gdtr = DescriptorTablePointer {
@@ -185,6 +203,27 @@ pub unsafe fn install(ist_double_fault: u64, ist_nmi: u64) -> Result<(), &'stati
     }
 
     Ok(())
+}
+
+/// 设置 `TSS.rsp0`：CPL 3 → CPL 0 切换时 CPU 换过去的内核栈顶。
+///
+/// 必须在任何用户态代码运行之前指向**当前用户线程**的内核栈顶，并在每次切换到用户线程时刷新
+/// （`user_mode.md` §6，决策 #48）——否则用户态里的中断会压到旧栈上。
+///
+/// # Safety
+/// `top` 必须是当前用户线程内核栈的高端地址。
+pub unsafe fn set_rsp0(top: u64) {
+    // SAFETY: 单核；TSS 是内核自己的静态存储，写入 `rsp0` 是纯内存操作。
+    unsafe {
+        (*GDT.tss.get()).rsp0 = top;
+    }
+}
+
+/// 读取 `TSS.rsp0`（自检用）。
+#[must_use]
+pub fn rsp0() -> u64 {
+    // SAFETY: 只读。
+    unsafe { (*GDT.tss.get()).rsp0 }
 }
 
 /// 当前 `CS`。

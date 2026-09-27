@@ -48,6 +48,10 @@ struct Slot {
     fx: FxSaveArea,
     /// 入口函数（仅用于诊断）。
     entry: u64,
+    /// 是否为用户线程（CPL 3）；决定切换时是否要刷新 `TSS.rsp0`。
+    user: bool,
+    /// 该线程内核栈的高端地址（用户线程运行时 `TSS.rsp0` 必须指向它）。
+    kernel_stack_top: u64,
 }
 
 impl Slot {
@@ -62,6 +66,8 @@ impl Slot {
             canary_address: 0,
             fx: FxSaveArea::zeroed(),
             entry: 0,
+            user: false,
+            kernel_stack_top: 0,
         }
     }
 }
@@ -113,6 +119,85 @@ pub fn create(entry: ThreadEntry) -> Result<usize, CreateError> {
         Err(_) => return Err(CreateError::NoFreeSlot),
     };
     create_with_id(id, entry)
+}
+
+/// 创建一个**用户线程**（M4a）：入口与栈都在用户区，帧里的选择子是 CPL 3。
+///
+/// 它同样需要一个内核栈：用户态发生中断/系统调用时，CPU 会按 `TSS.rsp0` 切到这个栈上
+/// （`user_mode.md` §6/§7）。
+///
+/// # Errors
+/// 见 [`CreateError`]。
+pub fn create_user(entry_va: u64, user_stack_top: u64) -> Result<usize, CreateError> {
+    let id = match sched::create_thread() {
+        Ok(id) => id,
+        Err(_) => return Err(CreateError::NoFreeSlot),
+    };
+    let kernel_stack = match memory::alloc_frames(THREAD_STACK_PAGES) {
+        Some(stack) => stack,
+        None => return Err(CreateError::NoStack),
+    };
+    // SAFETY: 刚分配、恒等映射、当前无人使用。
+    unsafe {
+        prepare_user_frame(id, entry_va, user_stack_top, &kernel_stack);
+    }
+    Ok(id)
+}
+
+/// 构造用户线程的初始帧：`iretq` 会切到 CPL 3 并从帧里取用户 `rsp`。
+///
+/// # Safety
+/// `kernel_stack` 必须是一段已分配、已恒等映射、当前无人使用的连续页帧。
+unsafe fn prepare_user_frame(
+    id: usize,
+    entry_va: u64,
+    user_stack_top: u64,
+    kernel_stack: &PhysRange,
+) {
+    let base = kernel_stack.start;
+    let top = kernel_stack.end();
+    // SAFETY: 由调用方保证可写。
+    unsafe { core::ptr::write_volatile(base as *mut u64, STACK_CANARY) };
+
+    let frame_address = top - size_of::<IrqFrame>() as u64;
+    // SAFETY: frame_address 在栈内、8 字节对齐，由调用方保证可写。
+    unsafe {
+        let frame = frame_address as *mut IrqFrame;
+        core::ptr::write_bytes(frame as *mut u8, 0, size_of::<IrqFrame>());
+        (*frame).rip = entry_va;
+        (*frame).rsp = user_stack_top; // 用户栈：`iretq` 会把它装回 rsp
+        (*frame).cs = u64::from(gdt::USER_CODE | 3);
+        (*frame).ss = u64::from(gdt::USER_DATA | 3);
+        // bit 1 恒为 1；IF = 1，于是服务在中断开启下起跑。
+        (*frame).rflags = 0x202;
+        (*frame).vector = u64::from(YIELD_VECTOR);
+    }
+
+    with_slots(|slots| {
+        slots[id].context = Context {
+            rsp: frame_address,
+            thread: id as u32,
+            _pad: 0,
+        };
+        slots[id].stack = Some(*kernel_stack);
+        slots[id].canary_address = base;
+        slots[id].entry = entry_va;
+        slots[id].fx = FxSaveArea::default_state();
+        slots[id].user = true;
+        slots[id].kernel_stack_top = top;
+    });
+}
+
+/// 该线程是否为用户线程。
+#[must_use]
+pub fn is_user(id: usize) -> bool {
+    with_slots(|slots| slots[id].user)
+}
+
+/// 该线程的内核栈顶（用户线程运行时写入 `TSS.rsp0`）。
+#[must_use]
+pub fn kernel_stack_top(id: usize) -> u64 {
+    with_slots(|slots| slots[id].kernel_stack_top)
 }
 
 /// 创建空闲线程：登记为空闲（不入队），分配栈并构造初始帧。
@@ -191,6 +276,9 @@ unsafe fn prepare_stack(id: usize, entry: ThreadEntry, stack: &PhysRange) {
         slots[id].canary_address = base;
         slots[id].entry = entry as usize as u64;
         slots[id].fx = FxSaveArea::default_state();
+        slots[id].user = false;
+        // 内核线程的"用户栈"就是它自己的内核栈；`rsp0` 只在用户线程上有意义。
+        slots[id].kernel_stack_top = top;
     });
 }
 
@@ -262,6 +350,8 @@ pub fn release(id: usize) {
     with_slots(|slots| {
         slots[id].canary_address = 0;
         slots[id].entry = 0;
+        slots[id].user = false;
+        slots[id].kernel_stack_top = 0;
         slots[id].context.rsp = 0;
     });
 }

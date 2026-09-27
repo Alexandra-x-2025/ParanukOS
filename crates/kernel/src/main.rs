@@ -25,10 +25,11 @@ mod sched;
 mod self_check;
 mod serial;
 mod thread;
+mod user;
 
 use boot_info::{
     BootInfo, EXIT_VALUE_KERNEL_FAILURE, EXIT_VALUE_KERNEL_FAULT, EXIT_VALUE_KERNEL_MEMORY_FAILURE,
-    EXIT_VALUE_KERNEL_SCHED_FAILURE, qemu_exit_code,
+    EXIT_VALUE_KERNEL_SCHED_FAILURE, EXIT_VALUE_USER_FAILURE, qemu_exit_code,
 };
 // 注入模式下不会走到"正常结束"，因此该常量仅在非注入构建中使用
 #[cfg(not(feature = "inject-fault"))]
@@ -40,6 +41,9 @@ use serial::Serial;
 
 /// 栈金丝雀：写在每段内核栈（线程栈、IST 栈）的最低 8 字节，回收时检查。
 const STACK_CANARY: u64 = 0x5061_7261_6E75_6B02;
+
+/// 等待其它线程完成或某个条件成立的自旋预算。
+const WAIT_BUDGET: u64 = 100_000_000;
 
 /// panic 处理器拿不到 `BootInfo`，因此入口处把退出端口存进这里。
 static EXIT_PORT: AtomicU32 = AtomicU32::new(0);
@@ -339,6 +343,41 @@ pub extern "C" fn kernel_main(boot_info: &BootInfo) -> ! {
         sched_stats.ticks,
         sched_stats.switches,
         sched_stats.live
+    );
+
+    // 11. M4a：第一个用户态服务。
+    // SAFETY: 单核、中断开着（服务必须被时钟抢占才能运行）；只调用一次。
+    if let Err(err) = unsafe { user::init(boot_info) } {
+        kerror!("user init FAILED: {err}");
+        finish(EXIT_VALUE_USER_FAILURE);
+    }
+    // 等它跑到 CPL 3、结束、并被回收：结束时只剩引导上下文与空闲线程。
+    if !sched::wait_until(
+        || user::reached_cpl3() && sched::stats().live == 2,
+        WAIT_BUDGET,
+    ) {
+        kerror!(
+            "user self-check FAILED: 服务没有运行到 CPL 3 或没有被回收（live={}, cpl3={}）",
+            sched::stats().live,
+            user::reached_cpl3()
+        );
+        finish(EXIT_VALUE_USER_FAILURE);
+    }
+    let elapsed = user::elapsed_ticks();
+    if elapsed == 0 {
+        kerror!("user self-check FAILED: 服务运行期间时钟没有推进（无法证明它被抢占过）");
+        finish(EXIT_VALUE_USER_FAILURE);
+    }
+    let rsp0 = gdt::rsp0();
+    if rsp0 == 0 {
+        kerror!("user self-check FAILED: TSS.rsp0 没有被设置（用户态中断会压到旧栈上）");
+        finish(EXIT_VALUE_USER_FAILURE);
+    }
+    kinfo!(
+        "user: 自检 OK（cs=0x{:X}，运行期间 {} 次 tick，rsp0=0x{:X}）",
+        user::syscall_cs(),
+        elapsed,
+        rsp0
     );
 
     // 退出协议（文档 §9.3）：报告之前关中断，避免时钟在报告与退出途中插入。
