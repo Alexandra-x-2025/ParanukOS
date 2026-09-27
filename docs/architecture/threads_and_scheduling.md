@@ -357,6 +357,10 @@ interrupts disabled, so the emulator stays usable.
 Runs in `kernel_main` after the M2 memory self-check, with interrupts enabled. Every step prints its
 outcome and a failure exits **45** with the step number, the invariant and the address/data involved.
 
+> The step numbers are **labels, not an execution order**: the implementation runs step 3 (preemption)
+> first, because nothing else can make progress without it. That is also why `inject-no-preempt`
+> fails with "step 3" rather than as a generic timeout somewhere else.
+
 1. **Mutual exclusion** — 4 threads, each performing 2000 increments of a shared counter *under the
    heap lock's sibling* (the same `SpinLock` implementation, a dedicated lock for the test). The final
    value must be exactly 8000; a lost update from a preemption inside the critical section shows up
@@ -431,10 +435,12 @@ The status marker says which part delivers each item.
 - [x] (M3a) `cargo test -p kernel-sched …` passes; clippy/fmt clean in every configuration, including
       `inject-double-fault`;
 - [x] (M3a) `check_kernel_elf.py` passes (the image grew to 109 pages, budget 256);
-- [ ] (M3b) self-check steps 1–6 pass on real QEMU + OVMF (all six are assertions, not prints);
-- [ ] (M3b) the boot context observed at least one preemption during step 3;
-- [ ] (M3b) after step 5 the frame allocator's free count is exactly its pre-thread value (no leaks);
-- [ ] (M3b) `inject-no-preempt` exits **45**; the smoke test grows to ≥ 42 assertions.
+- [x] (M3b) self-check steps 1–6 pass on real QEMU + OVMF (all six are assertions, not prints);
+- [x] (M3b) the boot context observed at least one preemption during step 3 (the run below shows 54
+      context switches, i.e. threads were preempted and resumed, not just started);
+- [x] (M3b) after step 5 the frame allocator's free count is exactly its value before the test threads
+      were created (no leaks) and the only live threads are the boot context and the idle thread;
+- [x] (M3b) `inject-no-preempt` exits **45** with "step 3"; the smoke test grew to **49** assertions.
 
 Measured on QEMU 8.2.2 + OVMF (M3a, 43/43 smoke assertions green):
 
@@ -443,6 +449,14 @@ gdt: GDT/TSS 已装载（CS=0x8 SS=0x10，TSS=0x123110，IST1=0x26F000，IST2=0x
 pic: 8259 已重映射到 0x20..0x2F，PIT 分频 11932（100 Hz），只放行 IRQ0
 sched: 1 个线程就绪，PIT 100 Hz，GDT/TSS 已装载
 timer: 观察到 3 次 tick（0 次调度决策），中断已按退出协议关闭
+```
+
+M3b (threads, preemption, six-step scheduler self-check):
+
+```
+sched: 空闲线程 = 线程 1；开始六步调度自检
+sched: 自检 OK（tick 20, 切换 54, 存活线程 2）
+timer: 中断已按退出协议关闭
 ```
 
 and for the injected double fault:
@@ -488,6 +502,7 @@ and for the injected double fault:
 | 36 | The `#DF` injection is a **genuine** double fault (corrupt the `#PF`/`#GP` gate selectors, then touch an unmapped address), not `int $8` | complete, trustworthy frame in the diagnostic | a software `int n` pushes no error code, so `int $8` misparses the frame and prints garbage — the claim would then be "proven" by an exit code alone | high |
 | 37 | The IDT is installed twice: once early (M1, every gate on the current stack) and again after the TSS is loaded, when the `#DF`/NMI gates are armed with their IST indices | IST gates only exist once a valid task register does | an IST gate without a loaded TSS escalates to a triple fault, which is exactly what IST is supposed to prevent | high |
 | 38 | One stack shape for every switch: `yield`/`exit` are software interrupts and all switching happens through the interrupt frame (§14.2) | `Context.rsp` always points at an `IrqFrame`; the `switch(from,to)` primitive is deleted | the cooperative and interrupt paths would otherwise leave different frames at `Context.rsp`, and the scheduler may resume any thread from either path — the mismatch corrupts every register | medium (it is an ABI) |
+| 40 | The self-check runs step 3 (preemption) **first**, keeping its step number as a label (§15) | `inject-no-preempt` fails with a specific "step 3: the spinning thread was never scheduled" instead of an unrelated later timeout | with preemption off nothing else can make progress, so every other wait would time out first and the diagnostic would point at the wrong subsystem | high |
 | 39 | Per-thread 16-byte-aligned FXSAVE areas in the kernel table, saved/restored only on a real switch (§14.3) | 512 bytes per thread (8 KiB total); `irq_common` loses its alignment dance | the stack variant couples the frame offset to the interrupted `rsp` alignment; M3a only works because kernel code happens to keep `rsp ≡ 8 (mod 16)` | high |
 
 ## 13. Interface change process

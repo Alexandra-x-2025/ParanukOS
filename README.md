@@ -134,8 +134,9 @@ free block). 35 assertions, all of which must pass.
 
 ### Known limitations
 
-*   **Milestones 0–3a only.** The kernel has no threads yet: the timer ticks, but nothing is
-    preempted (M3b adds the context switch, threads and reaping).
+*   **Milestones 0–3 only.** The kernel now has threads: a preemptive round-robin scheduler,
+    `yield`/`exit`, an idle thread, stack reaping and a six-step scheduler self-check. User mode, IPC
+    and per-thread address spaces are still missing (M4).
 *   **Milestones 0–2 only.** The bootloader loads the kernel, calls `exit_boot_services` and jumps to
     the entry point; the kernel validates `BootInfo`, installs its own IDT and page tables, brings up
     the frame allocator and heap, prints a summary on COM1 and exits. There is **no user mode, no IPC
