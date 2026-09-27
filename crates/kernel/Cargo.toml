@@ -32,3 +32,6 @@ inject-memory-fault = ["kernel-memory/inject-double-alloc"]
 # 仅用于测试：调度器起来之后执行 `int $8`，验证 `#DF` 会落在 IST1 栈上并打印诊断，
 # 而不是三重故障重启。生产构建绝不启用。
 inject-double-fault = []
+# 仅用于测试：时钟照常计数，但调度器永不切换到别的线程。抢占自检（§10 第 3 步）
+# 必须因此干净地以 45 失败，而不是让整机挂到超时。生产构建绝不启用。
+inject-no-preempt = []

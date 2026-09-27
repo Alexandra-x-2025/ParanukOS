@@ -3,11 +3,14 @@
 //! 为什么这是 M1 的第一件事（接口文档 §9）：没有 IDT 时，内核里的任何异常都会升级为
 //! 三重故障，表现为 QEMU 静默重启——几乎无法调试。
 //!
-//! M3 的扩展（`threads_and_scheduling.md` §3、§4、§7.5）：
+//! M3 的扩展（`threads_and_scheduling.md` §3、§4、§14.2/§14.3）：
 //! * 自建 GDT/TSS（见 `gdt.rs`），`#DF` 与 NMI 走 IST 栈——栈不可用时的双重故障现在可诊断；
-//! * 增加 IRQ 桩（向量 0x20..0x2F）：**完整保存/恢复通用寄存器**，并在进入 Rust 之前
-//!   `fxsave` 到本线程栈上，因此被抢占线程的 XMM 不会被接替者踩坏；
-//! * `irq_common` 是 M3b 抢占切换的落点：处理器返回的 `rsp` 非 0 时换栈再 `iretq`。
+//! * 中断桩（向量 0x20..0x2F 的 IRQ，以及 0x30/0x31 的"让出/退出"软件中断）：
+//!   **完整保存/恢复通用寄存器**，并共用同一个公共入口；
+//! * `irq_common` 是上下文切换的**唯一**落点：处理器返回的 `rsp` 非 0 时换栈再 `iretq`。
+//!   由于每种切换都经过中断帧，`Context.rsp` 永远指向同一个 `IrqFrame` 形状；
+//! * XMM 不在这里处理：每线程有自己的 FXSAVE 区，只在真正切换时由 `sched.rs` 保存/恢复
+//!   （把 FXSAVE 放在栈上会让帧偏移依赖被中断时的 `rsp` 对齐）。
 //!
 //! 异常仍然**不返回**：异常即内核崩溃，打印诊断后以退出码 41 结束。
 
@@ -197,6 +200,28 @@ pub struct IrqFrame {
 #[repr(C, align(16))]
 pub struct FxSaveArea(#[allow(dead_code)] [u8; 512]);
 
+impl FxSaveArea {
+    /// 全零的区（仅在还没被 `fxsave` 写过时使用）。
+    #[must_use]
+    pub const fn zeroed() -> Self {
+        Self([0u8; 512])
+    }
+
+    /// 架构默认的初始状态：`FCW = 0x037F`（偏移 0）、`MXCSR = 0x1F80`（偏移 24）。
+    ///
+    /// 新线程用这个初始化；直接从零恢复会让 MXCSR 变成 0（关闭所有异常屏蔽位），
+    /// 属于"看起来能跑、但浮点行为与其它线程不一致"的那类问题。
+    #[must_use]
+    pub const fn default_state() -> Self {
+        let mut area = [0u8; 512];
+        area[0] = 0x7F;
+        area[1] = 0x03;
+        area[24] = 0x80;
+        area[25] = 0x1F;
+        Self(area)
+    }
+}
+
 /// 读取当前 `CS`：`lgdt` 之后选择子仍是 `0x08`，因此这里读到的就是内核代码段。
 fn current_cs() -> u16 {
     let cs: u16;
@@ -302,6 +327,14 @@ irq_stub!(irq_45, 45);
 irq_stub!(irq_46, 46);
 irq_stub!(irq_47, 47);
 
+/// 软件中断：主动让出 CPU（附录 §14.2）。
+pub const YIELD_VECTOR: u8 = 0x30;
+/// 软件中断：线程退出。
+pub const EXIT_VECTOR: u8 = 0x31;
+
+irq_stub!(isr_yield, YIELD_VECTOR);
+irq_stub!(isr_exit, EXIT_VECTOR);
+
 /// IRQ 的公共入口：保存全部通用寄存器与 XMM，调用 Rust，然后（可能换栈）返回。
 ///
 /// 这是 M3b 抢占切换的落点：处理器返回值非 0 时，那个值就是下一个线程保存好的栈指针，
@@ -325,21 +358,16 @@ extern "C" fn irq_common() {
         "push r13",
         "push r14",
         "push r15",
-        // rdi = &IrqFrame（在改栈之前取好）
+        // rdi = &IrqFrame
         "mov rdi, rsp",
-        // 16 字节对齐后在栈上留出 FXSAVE 区
-        "and rsp, -16",
-        "sub rsp, 512",
-        "fxsave [rsp]",
-        "mov rsi, rsp",
         "call {handler}",
-        // 返回 0 = 回到被中断的上下文；非 0 = 该 rsp 是下一个线程保存好的状态
+        // 返回 0 = 回到被中断的上下文；非 0 = 该 rsp 是下一个线程保存好的帧
+        // （XMM 状态不在这里处理：每线程有自己的 FXSAVE 区，只在真正切换时保存/恢复，
+        //  见 threads_and_scheduling.md §14.3——那样就不必假设被中断时的 rsp 对齐）
         "test rax, rax",
         "jz 3f",
         "mov rsp, rax",
         "3:",
-        "fxrstor [rsp]",
-        "add rsp, 512",
         "pop r15",
         "pop r14",
         "pop r13",
@@ -525,6 +553,10 @@ pub unsafe fn install() {
     for (offset, handler) in irq_handlers.iter().enumerate() {
         idt.0[IRQ_VECTOR_BASE as usize + offset] = Gate::with_ist(*handler, selector, 0);
     }
+    // 让出与退出：软件中断，走同一个公共入口，因此切换只有一种栈形状（附录 §14.2）。
+    // DPL = 0：M3 只有内核态，用户态（M4）才需要允许 CPL 3 触发。
+    idt.0[YIELD_VECTOR as usize] = Gate::with_ist(isr_yield as *const () as u64, selector, 0);
+    idt.0[EXIT_VECTOR as usize] = Gate::with_ist(isr_exit as *const () as u64, selector, 0);
 
     let idtr = Idtr {
         limit: (size_of::<Idt>() - 1) as u16,
