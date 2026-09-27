@@ -178,12 +178,7 @@ pub fn map_user_region(
     // U 位=1）。真正的可达性由**叶项**决定：内核恒等映射的 2 MiB 大块叶项是 U=0，所以即使中间层
     // 允许用户访问，CPL 3 依然碰不到内核内存。
     if pdpt_entry & USER == 0 {
-        write_entry_at(
-            arena,
-            pml4_offset,
-            0,
-            pdpt_entry | USER,
-        );
+        write_entry_at(arena, pml4_offset, 0, pdpt_entry | USER);
     }
     let pdpt = ((pdpt_entry & ADDRESS_MASK) - address) as usize;
     let pdpt_index = ((USER_BASE >> 30) & 0x1FF) as usize;

@@ -268,7 +268,7 @@ QEMU 的 `isa-debug-exit` 退出码 = `(value << 1) | 1`。
 | **41** | **内核未处理异常或 panic** —— CPU 异常（`#UD`、`#GP`、`#PF` 等）或 `panic!` | **内核** | 已实现（M1） |
 | **43** | **内核内存初始化失败** —— 页表、页帧分配器或堆；见 [memory_subsystem_CN.md](memory_subsystem_CN.md) §7.1 | **内核** | 已实现（M2） |
 | **45** | **内核调度自检失败** —— 描述符表、中断、锁或线程；见 [threads_and_scheduling_CN.md](threads_and_scheduling_CN.md) §9.1 | **内核** | 已实现（M3） |
-| **47** | **用户态服务故障** —— CPL 3 的异常或系统调用参数被拒绝；见 [user_mode_CN.md](user_mode_CN.md) §9 | **内核** | 保留（M4） |
+| **47** | **用户态服务故障** —— CPL 3 的异常或系统调用参数被拒绝；见 [user_mode_CN.md](user_mode_CN.md) §9 | **内核** | 已实现（M4a） |
 | 124 | 超时未退出（判为卡死） | — | 已实现（判失败） |
 
 **33 与 37 必须分开**：否则测试无法区分"引导器装完就停了"与"内核真的跑起来了"，

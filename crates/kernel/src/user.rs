@@ -94,8 +94,11 @@ pub unsafe fn init(boot_info: &BootInfo) -> Result<usize, InitError> {
     );
 
     TICKS_BEFORE.store(crate::sched::ticks(), Ordering::Relaxed);
-    let id = thread::create_user(boot_info.user_entry, USER_STACK_VA + 4096 * USER_STACK_PAGES as u64)
-        .map_err(InitError::Thread)?;
+    let id = thread::create_user(
+        boot_info.user_entry,
+        USER_STACK_VA + 4096 * USER_STACK_PAGES as u64,
+    )
+    .map_err(InitError::Thread)?;
     SERVICE.store(id, Ordering::Relaxed);
     kinfo!("user: 服务线程 = 线程 {id}，等待它运行到 CPL 3");
     Ok(id)
@@ -132,7 +135,10 @@ pub(crate) fn on_syscall(frame: &IrqFrame) -> Decision {
         frame.rdi
     );
     if frame.cs & 3 != 3 {
-        kerror!("系统调用竟然来自 CPL {}——0x40 门的 DPL 配置有问题", frame.cs & 3);
+        kerror!(
+            "系统调用竟然来自 CPL {}——0x40 门的 DPL 配置有问题",
+            frame.cs & 3
+        );
     }
     crate::sched::exit_thread()
 }
