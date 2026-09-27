@@ -64,11 +64,7 @@ fn main() -> Status {
         let _ = writeln!(
             stdout,
             "[+ SUCCESS] 用户镜像已装载: base=0x{:X} size={} entry=0x{:X} vaddr_delta={} 段数={}",
-            user.base,
-            user.size,
-            user.entry,
-            user.vaddr_delta,
-            user.segments
+            user.base, user.size, user.entry, user.vaddr_delta, user.segments
         );
         let _ = stdout.set_color(Color::White, Color::Black);
 

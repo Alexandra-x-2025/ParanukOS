@@ -315,10 +315,22 @@ mod tests {
         assert!(complete.has_user_image());
         assert_eq!(complete.user_vaddr_end(), 0x1_0000_2000);
         for broken in [
-            BootInfo { user_phys: 0, ..complete },
-            BootInfo { user_size: 0, ..complete },
-            BootInfo { user_vaddr: 0, ..complete },
-            BootInfo { user_entry: 0, ..complete },
+            BootInfo {
+                user_phys: 0,
+                ..complete
+            },
+            BootInfo {
+                user_size: 0,
+                ..complete
+            },
+            BootInfo {
+                user_vaddr: 0,
+                ..complete
+            },
+            BootInfo {
+                user_entry: 0,
+                ..complete
+            },
         ] {
             assert!(!broken.has_user_image());
         }
