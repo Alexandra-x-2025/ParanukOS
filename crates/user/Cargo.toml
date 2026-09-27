@@ -1,0 +1,22 @@
+[package]
+name = "user"
+version = "0.1.0"
+edition = "2024"
+description = "ParanukOS 第一个用户态服务（Milestone 4a：证明特权切换）"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+user-lib = { path = "../user-lib" }
+
+[features]
+# 仅用于测试：解引用一个未映射的用户虚拟地址，验证 CPL 3 的 #PF 被上报为用户态故障（47）
+# 而不是内核崩溃（41）。生产构建绝不启用。
+inject-user-fault = []
+
+[[bin]]
+name = "user"
+path = "src/main.rs"
+# 与内核/UEFI 二进制同理：std 测试框架会与本 crate 的 panic 处理器冲突。
+test = false
+bench = false

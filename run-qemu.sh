@@ -11,6 +11,7 @@
 #   OVMF_VARS     指定 OVMF VARS 变量存储模板（默认与 CODE 同目录同名替换）
 #   ESP_DIR       虚拟盘目录（默认 ${TMPDIR:-/tmp}/paranukos_esp）
 #   KERNEL_ELF    内核镜像路径（默认 target/x86_64-unknown-none/debug/kernel）。
+#   USER_ELF      用户态服务镜像路径（默认 target/x86_64-unknown-none/debug/user）。
 #                 设为**空字符串**可禁止自动投放（冒烟测试的"缺少内核"用例依赖这一点）。
 #   ESP_EXTRA     目录，其内容会被一并复制进 ESP 根目录；
 #                 冒烟测试用它放入 \EFI\PARANUKO\KERNEL.ELF
@@ -98,6 +99,19 @@ if [ -n "${KERNEL_ELF}" ]; then
     else
         echo "[!] 未找到内核镜像 (${KERNEL_ELF})；ESP 中不会有 KERNEL.ELF，引导器将以 35 退出"
         echo "    先执行 cargo kernel，或设置 KERNEL_ELF=/path/to/kernel"
+    fi
+fi
+
+# 用户态服务镜像（M4）：缺失即装载失败（与内核镜像一致），因此默认自动投放。
+USER_ELF="${USER_ELF-target/x86_64-unknown-none/debug/user}"
+if [ -n "${USER_ELF}" ]; then
+    if [ -f "${USER_ELF}" ]; then
+        mkdir -p "${ESP_DIR}/EFI/PARANUKO"
+        cp "${USER_ELF}" "${ESP_DIR}/EFI/PARANUKO/USER.ELF"
+        echo "[+] 用户镜像: ${USER_ELF}"
+    else
+        echo "[!] 未找到用户镜像 (${USER_ELF})；ESP 中不会有 USER.ELF，引导器将以 35 退出"
+        echo "    先执行 cargo user，或设置 USER_ELF=/path/to/user"
     fi
 fi
 

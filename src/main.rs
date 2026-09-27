@@ -51,6 +51,27 @@ fn main() -> Status {
             }
         };
 
+        // 用户态服务镜像（M4）：与内核镜像同样的规则与失败处理——缺失或非法即 35。
+        let user = match FsLoader::load_user(stdout) {
+            Ok(user) => user,
+            Err(err) => {
+                let _ = stdout.set_color(Color::Red, Color::Black);
+                let _ = writeln!(stdout, "[-] 用户镜像装载失败: {err}");
+                return err.status();
+            }
+        };
+        let _ = stdout.set_color(Color::LightGreen, Color::Black);
+        let _ = writeln!(
+            stdout,
+            "[+ SUCCESS] 用户镜像已装载: base=0x{:X} size={} entry=0x{:X} vaddr_delta={} 段数={}",
+            user.base,
+            user.size,
+            user.entry,
+            user.vaddr_delta,
+            user.segments
+        );
+        let _ = stdout.set_color(Color::White, Color::Black);
+
         let prepared = match handoff::prepare(stdout) {
             Ok(prepared) => prepared,
             Err(err) => {
@@ -72,7 +93,7 @@ fn main() -> Status {
         );
         let _ = stdout.set_color(Color::White, Color::Black);
 
-        handoff::enter_kernel(stdout, &kernel, prepared)
+        handoff::enter_kernel(stdout, &kernel, &user, prepared)
     });
 
     // 走到这里说明装载或准备失败（成功路径永不返回）。

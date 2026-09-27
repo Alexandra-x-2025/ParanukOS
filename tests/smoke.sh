@@ -75,6 +75,13 @@ if ! command -v rustc >/dev/null 2>&1 || ! command -v cargo >/dev/null 2>&1; the
     exit 1
 fi
 
+echo "==> 1/6 构建用户态服务（$BARE_TARGET）"
+if ! cargo build -p user --target "$BARE_TARGET"; then
+    echo "[-] 用户态服务构建失败。" >&2
+    exit 1
+fi
+cp "target/${BARE_TARGET}/debug/user" "$WORK/USER.ELF"
+
 echo "==> 1/5 构建内核（$BARE_TARGET）"
 if ! cargo build -p kernel --target "$BARE_TARGET"; then
     echo "[-] 内核构建失败。" >&2
@@ -111,10 +118,16 @@ echo "    内核: $WORK/KERNEL.ELF ($(wc -c <"$WORK/KERNEL.ELF") 字节)"
 # 用法: boot_case <efi> <kernel_elf|-> <日志> <期望退出码> <描述>
 boot_case() {
     local efi="$1" kernel="$2" log="$3" want="$4" desc="$5"
+    local user="${6:-$WORK/USER.ELF}"
     if [ "$kernel" = "-" ]; then
         export KERNEL_ELF=""   # 显式禁用自动投放 → ESP 中没有 KERNEL.ELF
     else
         export KERNEL_ELF="$kernel"
+    fi
+    if [ "$user" = "-" ]; then
+        export USER_ELF=""     # 显式禁用自动投放 → ESP 中没有 USER.ELF
+    else
+        export USER_ELF="$user"
     fi
     : >"$log"
     timeout "$BOOT_TIMEOUT" env ESP_DIR="$ESP_DIR" ./run-qemu.sh "$efi" >"$log" 2>&1
@@ -148,6 +161,12 @@ boot_case "$WORK/loader.efi" "$WORK/KERNEL.ELF" "$LOG_DIR/m0-positive.log" "$EXI
     "合法内核：引导器装载并跳转，内核自检通过"
 grep_log "$LOG_DIR/m0-positive.log" '个 PT_LOAD 段' "引导器按段解析 ELF"
 grep_log "$LOG_DIR/m0-positive.log" '交接准备就绪' "引导器完成交接准备"
+if grep -qE '\[\+ SUCCESS\] 用户镜像已装载: base=0x[0-9A-F]+ size=[0-9]+ entry=0x[0-9A-F]+ vaddr_delta=[0-9]+ 段数=1' "$LOG_DIR/m0-positive.log"; then
+    ok "引导器装载了用户态服务镜像（M4：v1 BootInfo 字段）"
+else
+    bad "用户镜像装载日志缺失或形状不符"
+    show_log "$LOG_DIR/m0-positive.log"
+fi
 grep_log "$LOG_DIR/m0-positive.log" '\[kernel\] ParanukOS kernel alive' "内核真的开始执行"
 grep_log "$LOG_DIR/m0-positive.log" 'IDT 已安装' "内核安装了 IDT（M1）"
 grep_log "$LOG_DIR/m0-positive.log" 'self-check OK' "内核自检通过"
@@ -243,6 +262,11 @@ fi
 boot_case "$WORK/loader.efi" "-" "$LOG_DIR/m0-no-kernel.log" "$EXIT_LOAD_FAILURE" \
     "缺少内核镜像：以 35 失败"
 grep_log "$LOG_DIR/m0-no-kernel.log" '内核装载失败' "报告了失败原因"
+
+# --- B2. 反向：ESP 中没有用户镜像 → 装载失败（35） ---
+boot_case "$WORK/loader.efi" "$WORK/KERNEL.ELF" "$LOG_DIR/m4-no-user.log" "$EXIT_LOAD_FAILURE" \
+    "缺少用户镜像：以 35 失败" "-"
+grep_log "$LOG_DIR/m4-no-user.log" '用户镜像装载失败' "报告了用户镜像的失败原因"
 
 # --- C. 反向 2：内核镜像存在但不是合法 ELF → 装载失败（35） ---
 boot_case "$WORK/loader.efi" "$WORK/not-elf.bin" "$LOG_DIR/m0-bad-elf.log" "$EXIT_LOAD_FAILURE" \
