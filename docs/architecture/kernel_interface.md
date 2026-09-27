@@ -291,7 +291,7 @@ QEMU's `isa-debug-exit` exit code is `(value << 1) | 1`.
 | **41** | **Kernel fault or panic** — an unhandled CPU exception (`#UD`, `#GP`, `#PF`, …) or a `panic!` | **kernel** | implemented (M1) |
 | **43** | **Kernel memory initialisation failed** — page tables, frame allocator or heap; see [memory_subsystem.md](memory_subsystem.md) §7.1 | **kernel** | implemented (M2) |
 | **45** | **Kernel scheduler self-check failed** — descriptor tables, interrupts, locking or threads; see [threads_and_scheduling.md](threads_and_scheduling.md) §9.1 | **kernel** | implemented (M3) |
-| **47** | **User-space service failed** — a fault at CPL 3 or a rejected syscall argument; see [user_mode.md](user_mode.md) §9 | **kernel** | reserved (M4) |
+| **47** | **User-space service failed** — a fault at CPL 3 or a rejected syscall argument; see [user_mode.md](user_mode.md) §9 | **kernel** | implemented (M4a) |
 | 124 | Timed out without exiting (treated as a hang) | — | implemented (fails) |
 
 **33 and 37 must stay distinct**: otherwise the test cannot tell "the bootloader loaded and stopped"

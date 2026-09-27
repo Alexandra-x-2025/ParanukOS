@@ -134,6 +134,7 @@ free block). 35 assertions, all of which must pass.
 
 ### Known limitations
 
+*   **Milestones 0–4a only.** A user-space service runs at CPL 3 in a user-accessible region (the identity map stays supervisor-only) and is preempted in user mode. It has no syscalls yet, and there is only one address space (M4b adds the call table).
 *   **Milestones 0–3 only.** The kernel now has threads: a preemptive round-robin scheduler,
     `yield`/`exit`, an idle thread, stack reaping and a six-step scheduler self-check. User mode, IPC
     and per-thread address spaces are still missing (M4).
