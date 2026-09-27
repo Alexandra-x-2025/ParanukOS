@@ -134,6 +134,8 @@ const P_TYPE_OFFSET: usize = 0;
 const P_FLAGS_OFFSET: usize = 4;
 const P_OFFSET_OFFSET: usize = 8;
 const P_PADDR_OFFSET: usize = 24;
+/// `p_vaddr`（虚拟地址）。
+const P_VADDR_OFFSET: usize = 16;
 const P_FILESZ_OFFSET: usize = 32;
 const P_MEMSZ_OFFSET: usize = 40;
 
@@ -148,6 +150,11 @@ pub struct Segment {
     pub offset: u64,
     /// 装载到的**物理**地址（`p_paddr`）。
     pub paddr: u64,
+    /// 链接时使用的**虚拟**地址（`p_vaddr`）。
+    ///
+    /// 内核镜像里它与 `paddr` 相同（恒等链接）；用户态镜像链接在用户区、装载在低地址，
+    /// 引导器用 `vaddr - paddr` 把整个物理装载区间换算成用户虚拟地址（`user_mode.md` §3）。
+    pub vaddr: u64,
     /// 文件中有多少字节（`p_filesz`）。
     pub filesz: u64,
     /// 装载后占多少字节（`p_memsz`，通常大于 `filesz`，差额为 BSS）。
@@ -251,6 +258,7 @@ impl Iterator for SegmentIter<'_> {
             let segment = Segment {
                 offset: read_u64(entry_data, P_OFFSET_OFFSET),
                 paddr: read_u64(entry_data, P_PADDR_OFFSET),
+                vaddr: read_u64(entry_data, P_VADDR_OFFSET),
                 filesz: read_u64(entry_data, P_FILESZ_OFFSET),
                 memsz: read_u64(entry_data, P_MEMSZ_OFFSET),
                 flags: read_u32(entry_data, P_FLAGS_OFFSET),
@@ -341,13 +349,16 @@ pub fn check_no_overlap(data: &[u8]) -> Result<(), SegmentError> {
 
 /// 校验入口点落在某个可执行段内。
 pub fn check_entry(data: &[u8], entry: u64) -> Result<(), SegmentError> {
+    // 按 ELF 语义用 **`p_vaddr`** 判断入口落在哪个段里：`e_entry` 是虚拟地址。
+    // 内核镜像是恒等链接（`p_vaddr == p_paddr`），因此这条检查对它们一如既往；
+    // 用户态镜像链接在用户区、装载在低地址，只有用 `p_vaddr` 才判得对（`user_mode.md` §4）。
     for segment in segments(data)? {
         let segment = segment?;
         let end = segment
-            .paddr
+            .vaddr
             .checked_add(segment.memsz)
             .ok_or(SegmentError::AddressOverflow)?;
-        if segment.is_executable() && (segment.paddr..end).contains(&entry) {
+        if segment.is_executable() && (segment.vaddr..end).contains(&entry) {
             return Ok(());
         }
     }
@@ -550,6 +561,7 @@ mod tests {
         let segment = Segment {
             offset: 0,
             paddr: 0x104B38,
+            vaddr: 0x104B38,
             filesz: 8,
             memsz: 56,
             flags: PF_R | PF_W,

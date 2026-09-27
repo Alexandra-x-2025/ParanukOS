@@ -18,6 +18,9 @@ use uefi::proto::console::text::Output;
 /// 内核镜像在 ESP 中的约定路径。
 const KERNEL_PATH: &CStr16 = cstr16!("\\EFI\\PARANUKO\\KERNEL.ELF");
 
+/// 用户态服务镜像在 ESP 中的约定路径（`user_mode.md` §4）。
+const USER_PATH: &CStr16 = cstr16!("\\EFI\\PARANUKO\\USER.ELF");
+
 /// 一次装载最多覆盖的独立页数。
 ///
 /// M0 的内核只有几页；M2 起内核镜像里多了两块静态 `.bss`（页表竞技场 28 KiB、
@@ -29,7 +32,7 @@ const MAX_KERNEL_PAGES: usize = 256;
 /// 载入成功的内核信息。
 #[derive(Debug)]
 pub struct LoadedKernel {
-    /// 所有段覆盖的页对齐区间起点。
+    /// 所有段覆盖的页对齐区间起点（物理地址）。
     pub base: u64,
     /// 该区间的字节长度。
     pub size: u64,
@@ -37,6 +40,11 @@ pub struct LoadedKernel {
     pub entry: u64,
     /// `PT_LOAD` 段数量。
     pub segments: usize,
+    /// 第一个 `PT_LOAD` 段的 `p_vaddr - p_paddr` 差值。
+    ///
+    /// 内核镜像恒等链接（差值为 0），用户镜像则用它把**物理**装载区间换算成用户虚拟地址：
+    /// 内核不需要 ELF 解析器就能把整段映射到 `[vaddr + delta, …)`（`user_mode.md` §3，决策 #43）。
+    pub vaddr_delta: i64,
 }
 
 /// 内核装载失败的原因。
@@ -111,14 +119,27 @@ pub struct FsLoader;
 impl FsLoader {
     /// 定位 ESP 卷、读取并校验内核镜像，然后按段装载。
     pub fn load_kernel(stdout: &mut Output) -> Result<LoadedKernel, LoadError> {
+        Self::load(stdout, KERNEL_PATH, "内核")
+    }
+
+    /// 装载用户态服务镜像（`user_mode.md` §4）。
+    ///
+    /// 规则与内核镜像完全相同：ELF64 / 小端 / `ET_EXEC` / 段不重叠 / 入口在可执行段内；
+    /// 缺失或非法一律与内核镜像同样处理（引导器返回装载失败 → 35）。
+    pub fn load_user(stdout: &mut Output) -> Result<LoadedKernel, LoadError> {
+        Self::load(stdout, USER_PATH, "用户")
+    }
+
+    /// 按给定路径装载一个 ELF 镜像。
+    fn load(stdout: &mut Output, path: &CStr16, what: &str) -> Result<LoadedKernel, LoadError> {
         // 1. 打开「本引导镜像所在的卷」
         let _ = writeln!(stdout, "[*] 打开引导镜像所在卷 ...");
         let fs_proto = boot::get_image_file_system(boot::image_handle())?;
         let mut fs = FileSystem::new(fs_proto);
 
         // 2. 读取内核镜像
-        let _ = writeln!(stdout, "[*] 读取内核镜像 {KERNEL_PATH} ...");
-        let data = fs.read(KERNEL_PATH)?;
+        let _ = writeln!(stdout, "[*] 读取{what}镜像 {path} ...");
+        let data = fs.read(path)?;
         let _ = writeln!(stdout, "[*] 读取完成: {} 字节", data.len());
 
         // 3. 校验 ELF 头与段布局
@@ -127,6 +148,12 @@ impl FsLoader {
         kernel_image::check_no_overlap(&data)?;
         kernel_image::check_entry(&data, entry)?;
         let (base, end) = kernel_image::loaded_span(&data)?;
+        // 用户镜像的 p_vaddr 与 p_paddr 不同（链接在用户区、装载在低地址），差值由第一个段给出。
+        // `check_segments` 已经确认至少有一个非空段，因此这里不会为空。
+        let first = kernel_image::segments(&data)?
+            .next()
+            .ok_or(SegmentError::EmptySegment)??;
+        let vaddr_delta = first.vaddr as i64 - first.paddr as i64;
         let _ = writeln!(
             stdout,
             "[*] ELF64/x86-64 校验通过: {segments} 个 PT_LOAD 段, 入口 0x{entry:X}, 占用 0x{base:X}..0x{end:X}"
@@ -190,6 +217,7 @@ impl FsLoader {
             size: end - base,
             entry,
             segments,
+            vaddr_delta,
         })
     }
 }

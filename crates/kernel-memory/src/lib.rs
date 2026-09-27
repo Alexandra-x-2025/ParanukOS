@@ -5,7 +5,8 @@
 //! * [`map`]：解析 UEFI 内存图（40/48 字节步长、未知类型视为非 RAM、溢出即判损坏）；
 //! * [`paging`]：由内存图构建恒等映射的四级页表（纯逻辑，不碰 `CR3`）；
 //! * [`frame`]：位图式物理页帧分配器（只发放 `EfiConventionalMemory`，最低地址优先）；
-//! * [`heap`]：首次匹配空闲链表（块头在竞技场内，释放时合并）。
+//! * [`heap`]：首次匹配空闲链表（块头在竞技场内，释放时合并）；
+//! * [`user_map`]：把物理页映射到用户虚拟地址（`U/S = 1`，`user_mode.md` §5）。
 //!
 //! 设计约束：
 //! * **零依赖**、`no_std`：内核要链接它，同时它必须能在宿主平台被单元测试覆盖
@@ -23,3 +24,4 @@ pub mod frame;
 pub mod heap;
 pub mod map;
 pub mod paging;
+pub mod user_map;

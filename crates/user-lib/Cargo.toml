@@ -1,0 +1,10 @@
+[package]
+name = "user-lib"
+version = "0.1.0"
+edition = "2024"
+description = "ParanukOS 用户态服务的最小运行库：系统调用包装（user_mode.md §8）"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# 有意保持零依赖：与内核 crate 同样的理由（no_std、可在宿主平台单测）。

@@ -185,3 +185,14 @@ name = "unicode-ident"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
+
+[[package]]
+name = "user"
+version = "0.1.0"
+dependencies = [
+ "user-lib",
+]
+
+[[package]]
+name = "user-lib"
+version = "0.1.0"

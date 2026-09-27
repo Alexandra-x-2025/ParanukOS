@@ -47,6 +47,17 @@ pub fn create_thread() -> Result<usize, SchedError> {
     with_sched(|sched| sched.create())
 }
 
+/// 结束当前线程（供系统调用路径复用退出逻辑）。
+pub fn exit_thread() -> Decision {
+    match with_sched(|sched| sched.exit_current()) {
+        Ok(decision) => decision,
+        Err(err) => {
+            kerror!("线程退出失败：{err}");
+            Decision::Keep
+        }
+    }
+}
+
 /// 登记空闲线程（不入队）。
 pub fn register_idle_thread() -> Result<usize, SchedError> {
     with_sched(|sched| sched.register_idle_any())
@@ -107,6 +118,11 @@ unsafe fn switch_to(from: usize, to: usize, frame: u64) -> u64 {
         let (from_context, from_fx) = thread::context_and_fx(from);
         let (to_context, to_fx) = thread::context_and_fx(to);
         (*from_context).rsp = frame;
+        // 用户线程的内核栈要写进 TSS.rsp0：用户态里的下一个中断会切到它上面
+        // （user_mode.md §6，决策 #48）。
+        if thread::is_user(to) {
+            crate::gdt::set_rsp0(thread::kernel_stack_top(to));
+        }
         // 只在真正切换时碰 XMM（附录 §14.3）：把 FXSAVE 放在栈上会让帧偏移依赖被中断时的
         // rsp 对齐，因此改为每线程一个区。
         core::arch::asm!("fxsave [{}]", in(reg) from_fx, options(nostack, preserves_flags));
@@ -149,13 +165,9 @@ pub(crate) extern "C" fn irq_handler(frame: *const IrqFrame) -> u64 {
     } else if vector == idt::YIELD_VECTOR {
         with_sched(|sched| sched.yield_current())
     } else if vector == idt::EXIT_VECTOR {
-        match with_sched(|sched| sched.exit_current()) {
-            Ok(decision) => decision,
-            Err(err) => {
-                kerror!("线程退出失败：{err}");
-                Decision::Keep
-            }
-        }
+        exit_thread()
+    } else if vector == idt::SYSCALL_VECTOR {
+        crate::user::on_syscall(unsafe { &*frame })
     } else if vector == pic::SPURIOUS_IRQ7_VECTOR {
         // SAFETY: 端口 I/O；伪中断不能无条件 EOI。
         let spurious = unsafe { pic::handle_spurious_irq7() };

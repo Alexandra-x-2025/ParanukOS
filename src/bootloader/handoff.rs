@@ -79,7 +79,12 @@ fn find_rsdp() -> u64 {
 }
 
 /// 完成交接并跳入内核。**永不返回。**
-pub fn enter_kernel(stdout: &mut Output, kernel: &LoadedKernel, prepared: Prepared) -> ! {
+pub fn enter_kernel(
+    stdout: &mut Output,
+    kernel: &LoadedKernel,
+    user: &LoadedKernel,
+    prepared: Prepared,
+) -> ! {
     let _ = writeln!(
         stdout,
         "[+] 交接准备就绪: rsp=0x{:X} rdi=0x{:X} jmp=0x{:X}",
@@ -118,6 +123,11 @@ pub fn enter_kernel(stdout: &mut Output, kernel: &LoadedKernel, prepared: Prepar
         stack_top: prepared.stack_top,
         stack_size: KERNEL_STACK_SIZE as u64,
         exit_port: u32::from(exit_port()),
+        // v1：用户镜像。装载在 user.base（物理），链接在 user.base 加上第一个段的 vaddr-paddr 差值处。
+        user_phys: user.base,
+        user_size: user.size,
+        user_vaddr: (user.base as i64 + user.vaddr_delta) as u64,
+        user_entry: user.entry,
         ..BootInfo::new()
     };
     // 故障注入（仅测试）：用来验证内核确实会拒绝错误的 magic 并以 39 退出

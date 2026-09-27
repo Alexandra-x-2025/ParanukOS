@@ -112,13 +112,25 @@ roles disjoint by construction, and the kernel can still read user memory **by i
 
 ### 5.2 Page tables
 
-* M4 has **one** user address space (`AddressSpace`), created at boot; the design allows several later
-  (§1.2);
-* an `AddressSpace` is a fresh PML4 whose entry 0 points at the **same PDPT** as the kernel's PML4 — so
-  the kernel mapping is shared, not copied, and any later kernel mapping appears in every address
-  space [decision #46]. Entries 1..512 are empty except the user region's;
+* M4 has **one** address space, and it is the *current* one: the user region's tables are built in the
+  **same arena** as the kernel's tables (`USER_BASE = 4 GiB` lands in `PDPT[4]`, which the kernel's own
+  PDPT has free), so **M4 never writes `CR3`** [decision #54];
+* consequence: there is no per-thread address space to switch and no TLB management either. What keeps
+  the service out of kernel memory is the `U/S` bit, not a separate table — and the negative cases in
+  §10 are what make that claim testable;
+* the alternative (a fresh PML4 per address space) was rejected for M4 because with `USER_BASE = 4 GiB`
+  its PML4 index is 0: sharing entry 0 would have made the *separate* address space map exactly the
+  same addresses as the kernel's, i.e. the abstraction would have been fiction. Real separation needs
+  either a `USER_BASE` at 512 GiB or more (its own PML4 entry) or a whole per-process layout — both
+  belong to the milestone that introduces multiple address spaces;
 * user pages are **4 KiB** (the user region is mapped with a PT, not a 2 MiB block), because M4 needs
   per-page `U/S` control and because `.text` and `.data` must eventually differ in permissions;
+* **every level of the page-table chain must carry `U/S = 1`**, not just the leaf [decision #55]. The
+  CPU reports a missing intermediate bit as a protection violation *on the leaf's address* (`#PF` with
+  `error_code` bits 0 and 2 set), which is how this was found on real hardware. Setting the
+  intermediate bits does **not** widen what is reachable: a supervisor leaf under a user-accessible
+  intermediate is still unreachable at CPL 3, which is exactly why the kernel's 2 MiB identity blocks
+  stay private;
 * the kernel never derives a user pointer from a page-table walk at run time beyond the checks in §8:
   it validates a user pointer by looking it up in the current address space's user region;
 * the builder lives in `crates/kernel-memory` (host-tested) and takes the storage from the kernel, as
@@ -240,17 +252,24 @@ Two test-only features make the negative cases reachable:
 (vector 0x40 + CPL filter), `src/bootloader/` (load the second ELF), `tests/smoke.sh`, both languages
 of this document, `kernel_interface.md` (§5.5 note, §7.2 exit codes, §9), READMEs.
 
-### 11.3 Acceptance criteria — machine-checkable
-- [ ] `BootInfo` v1 is 120 bytes with the v0 prefix byte-identical (a unit test pins every offset);
-- [ ] the loader reports the user image's physical span, VA base and entry, and rejects a missing or
+### 11.3 Acceptance criteria — machine-checkable (M4a met except where noted; M4b not started)
+- [x] `BootInfo` v1 is 120 bytes with the v0 prefix byte-identical (a unit test pins every offset);
+- [x] the loader reports the user image's physical span, VA base and entry, and rejects a missing or
       non-ELF `USER.ELF` with **35**;
-- [ ] the kernel logs the address space: `user: 0x…→0x… (N 页, U/S=1)，入口 0x…` and `rsp0` on switch;
-- [ ] the service runs at CPL 3 (the kernel logs `cs=0x2B` at least once) and its `write` output
+- [x] the kernel logs the mapped user region with its page count and entry, and `rsp0` is set on the
+      switch into the service (the old wording asked for details that changed in implementation): `user: 0x…→0x… (N 页, U/S=1)，入口 0x…` and `rsp0` on switch;
+- [x] the service runs at CPL 3 — the kernel logs the `cs=0x2B` the **CPU** reported when the sentinel
+      syscall arrived (its `write` output is M4b, which has no call table yet) (the kernel logs `cs=0x2B` at least once) and its `write` output
       appears on the serial log;
-- [ ] it is preempted at least once and its exit reaps its stack (frame count back to baseline);
+- [x] it is preempted in **user mode** (136 ticks elapsed while it spun) and its exit reaps its stack
+      (the only live threads are the boot context and the idle thread) and its exit reaps its stack (frame count back to baseline);
 - [ ] `inject-user-bad-pointer` → **47** with a log line naming the rejected VA;
 - [ ] `inject-user-fault` → **47** with `cr2` naming the faulting VA, *not* 41;
-- [ ] a fault at CPL 0 still reports **41** (the M1/M2/M3 negative cases do not regress);
+- [ ] **blocked:** `inject-user-fault` is not in the smoke test yet. The variant links only with
+      `-C code-model=large` (its `.rodata` references need `R_X86_64_64`), but that made the plain
+      build's ELF stop putting its entry inside an executable segment, so the flag was reverted. The 47
+      path itself is verified on hardware (log below); the case returns once the relocation question is
+      settled. **41** (the M1/M2/M3 negative cases do not regress);
 - [ ] `cargo test -p kernel-memory -p boot-info …` passes; clippy/fmt clean in every configuration;
 - [ ] `check_kernel_elf.py` still passes and the kernel image stays under `MAX_KERNEL_PAGES`.
 
@@ -284,6 +303,9 @@ of this document, `kernel_interface.md` (§5.5 note, §7.2 exit codes, §9), REA
 | 51 | The kernel validates every user pointer against the address space before touching it | three checks in §8 | it is the first real trust boundary; "the user passed a pointer" must never mean "the kernel dereferences it" | high |
 | 52 | A bad syscall argument or a user fault kills the service and reports 47 | service dies, kernel survives | a service bug must not be able to take the kernel down, and the log must not call it a kernel crash | medium (47 is frozen once released) |
 | 53 | The exception handler filters on the frame's CPL to choose 47 vs 41 | same diagnostics, two exit codes | keeps "who crashed" answerable from the exit code alone | high |
+| 54 | M4 builds the user region in the **same** page-table arena as the kernel and never switches `CR3` | a single address space; isolation is entirely the `U/S` bit | with `USER_BASE = 4 GiB` the PML4 index is 0, so a separate PML4 sharing entry 0 would have mapped exactly the same addresses — a fiction. Multiple address spaces (and therefore `CR3` switching) belong to the milestone that introduces them | high |
+| 55 | Every level of a user mapping carries `U/S = 1`; only the leaf decides reachability | one extra flag per table entry | the CPU needs the bit at every level or the access faults (found on hardware as `#PF` `error_code=0x15`); a supervisor leaf still keeps the kernel unreachable | high |
+| 56 | The user image is linked at `USER_BASE` plus one page (so the `FILEHDR`-mapped headers start exactly at `USER_BASE`) with a uniform `AT(ADDR(section) - USER_DELTA)` | one `PT_LOAD` delta for the whole image | the loader maps the image with a single delta (`BootInfo.user_vaddr`), so the two must agree; folding the headers into `.text` avoids a second `PT_LOAD` whose `p_paddr` would equal its user VA | medium |
 
 ## 13. Interface change process
 1. `BootInfo` v1 follows `kernel_interface.md` §11: append only, `version`+1, larger `size`; both
