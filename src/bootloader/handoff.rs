@@ -138,6 +138,34 @@ pub fn enter_kernel(stdout: &mut Output, kernel: &LoadedKernel, prepared: Prepar
     // 引导服务后不会真正释放内存，但显式 forget 更清楚地表达"这块内存属于内核"。
     core::mem::forget(memory_map);
 
+    // 复核并修复 magic：观察到的偶发故障是"写完之后 magie 的低 4 字节被改写"
+    // （kernel_interface.md §6.2），写者身份仍未定位。这里在跳转之前最后复核一次，坏了就改回来，
+    // 并把修复次数留在 BootInfo 页的末尾（偏移 120），内核会打印它——这样故障从"随机启动失败"
+    // 变成"可观测、可计数"。注入错误 magic 的测试构建跳过这一步，否则会把注入"修好"。
+    #[cfg(not(feature = "inject-bad-magic"))]
+    {
+        // SAFETY: 由 `Prepared` 的契约保证该指针有效。
+        let magic_slot = unsafe { core::ptr::addr_of_mut!((*prepared.boot_info).magic) };
+        let mut repairs = 0u64;
+        for _ in 0..8 {
+            // SAFETY: prepared.boot_info 指向一页可写的 LOADER_DATA；addr_of_mut! 不产生引用。
+            let current = unsafe { core::ptr::read_volatile(magic_slot) };
+            if current == BOOT_INFO_MAGIC {
+                break;
+            }
+            // SAFETY: 同上。
+            unsafe { core::ptr::write_volatile(magic_slot, BOOT_INFO_MAGIC) };
+            repairs += 1;
+        }
+        // SAFETY: 页内偏移 120 属于 BootInfo 页的空闲区（结构体只有 88 字节）。
+        unsafe {
+            core::ptr::write_volatile(
+                (prepared.boot_info as *mut u8).add(120) as *mut u64,
+                repairs,
+            );
+        }
+    }
+
     // SAFETY: 满足接口文档 §4 的入口 ABI：entry 指向已装载的内核代码，
     // boot_info 指针有效，stack_top 是已分配内核栈的高端且 16 字节对齐
     // （因此 stack_top - 8 满足 rsp % 16 == 8）。

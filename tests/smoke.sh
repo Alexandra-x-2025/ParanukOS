@@ -215,6 +215,21 @@ else
     show_log "$LOG_DIR/m0-positive.log"
 fi
 
+# --- M3b：线程、抢占与调度自检（threads_and_scheduling.md §10/§15） ---
+if grep -qE 'sched: 空闲线程 = 线程 1' "$LOG_DIR/m0-positive.log"; then
+    ok "空闲线程已创建（线程 1）"
+else
+    bad "空闲线程日志缺失"
+    show_log "$LOG_DIR/m0-positive.log"
+fi
+if grep -qE 'sched: 自检 OK（tick [0-9]+, 切换 [1-9][0-9]*, 存活线程 2）' "$LOG_DIR/m0-positive.log"; then
+    ok "六步调度自检通过：发生过真实切换，且结束时只剩引导上下文与空闲线程"
+else
+    bad "调度自检未通过（切换次数为 0 或线程泄漏）"
+    show_log "$LOG_DIR/m0-positive.log"
+fi
+grep_log "$LOG_DIR/m0-positive.log" 'timer: 中断已按退出协议关闭' "报告前按退出协议关闭中断"
+
 # 映射规模必须覆盖测试虚拟机的主要内存（QEMU 默认 128 MiB，这里放宽到 64 MiB）
 mapped_mib="$(sed -n 's/.*个 2 MiB 大块（\([0-9]*\) MiB.*/\1/p' "$LOG_DIR/m0-positive.log" | head -1)"
 if [ -n "$mapped_mib" ] && [ "$mapped_mib" -ge 64 ]; then
@@ -306,6 +321,21 @@ boot_case "$WORK/loader.efi" "$WORK/KERNEL-df.ELF" "$LOG_DIR/m3a-double-fault.lo
 grep_log "$LOG_DIR/m3a-double-fault.log" '#DF 双重故障' "指认了向量（#DF 双重故障）"
 grep_log "$LOG_DIR/m3a-double-fault.log" '实际运行栈：IST1 栈' "直接证明异常换到了 IST1 栈（而不是三重故障）"
 grep_log "$LOG_DIR/m3a-double-fault.log" 'error_code=0x0' "帧格式完整（真正的 #DF 带错误码）"
+
+# --- I. 故障注入：抢占被关闭 → 自旋线程拿不到标志 → 45（M3b） ---
+#
+# 时钟照常计 tick，但调度器永不切换到别的线程。自旋线程的 tick 预算耗尽后自检必须干净地
+# 以 45 结束——这正是"有界预算"设计的价值：否则整机只会挂到超时（124）。
+echo "==> 附加用例：抢占被关闭（故障注入）"
+if ! cargo build -p kernel --target "$BARE_TARGET" --features inject-no-preempt; then
+    echo "[-] 注入"关闭抢占"的内核构建失败。" >&2
+    exit 1
+fi
+cp "target/${BARE_TARGET}/debug/kernel" "$WORK/KERNEL-nopreempt.ELF"
+boot_case "$WORK/loader.efi" "$WORK/KERNEL-nopreempt.ELF" "$LOG_DIR/m3b-no-preempt.log" "$EXIT_KERNEL_SCHED_FAILURE" \
+    "抢占被关闭：自检以 45 退出而不是挂死"
+grep_log "$LOG_DIR/m3b-no-preempt.log" '调度自检第 3 步失败' "指明是抢占那一步失败"
+grep_log "$LOG_DIR/m3b-no-preempt.log" '抢占测试没有结束' "失败原因指明抢占测试没有结束"
 
 echo
 echo "结果: ${pass} 项通过, ${fail} 项失败"

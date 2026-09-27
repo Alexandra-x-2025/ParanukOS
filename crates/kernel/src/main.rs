@@ -22,7 +22,9 @@ mod logging;
 mod memory;
 mod pic;
 mod sched;
+mod self_check;
 mod serial;
+mod thread;
 
 use boot_info::{
     BootInfo, EXIT_VALUE_KERNEL_FAILURE, EXIT_VALUE_KERNEL_FAULT, EXIT_VALUE_KERNEL_MEMORY_FAILURE,
@@ -79,6 +81,15 @@ pub extern "C" fn kernel_main(boot_info: &BootInfo) -> ! {
         boot_info.size,
         boot_info.magic
     );
+    // 引导器把"写完之后 magic 被改写、需要修复"的次数留在页内偏移 120（见 handoff.rs）。
+    // 非零说明那个仍未定位的写者又出现了——把它变成可观测的事实，而不是随机的启动失败。
+    // SAFETY: 偏移 120 仍在 BootInfo 那一页内（结构体 88 字节）。
+    let repairs = unsafe {
+        core::ptr::read_volatile((boot_info as *const BootInfo as *const u8).add(120) as *const u64)
+    };
+    if repairs != 0 {
+        kwarn!("引导器在跳转前修复了 {repairs} 次 BootInfo.magic（偶发改写再次出现，见 §6.2）");
+    }
 
     // 2. 内存图必须可用
     if !boot_info.has_memory_map() {
@@ -263,11 +274,10 @@ pub extern "C" fn kernel_main(boot_info: &BootInfo) -> ! {
             finish(EXIT_VALUE_KERNEL_SCHED_FAILURE);
         }
     };
-    // 关中断，准备报告：退出协议要求"报告前先关中断"（文档 §9.3）。
-    let _quiet = lock::critical();
+    // 注意：**不能**在这里关中断——下面的 M3b 自检需要时钟抢占自己（否则永远不会切换）。
     let sched_stats = sched::stats();
     kinfo!(
-        "timer: 观察到 {ticks} 次 tick（{} 次调度决策），中断已按退出协议关闭",
+        "timer: 观察到 {ticks} 次 tick（{} 次调度决策）",
         sched_stats.switches
     );
     // IST 栈的金丝雀：溢出会改写页首的金丝雀。
@@ -309,6 +319,31 @@ pub extern "C" fn kernel_main(boot_info: &BootInfo) -> ! {
         );
         finish(EXIT_VALUE_KERNEL_SCHED_FAILURE);
     }
+
+    // 10. M3b：线程、空闲线程与调度自检（threads_and_scheduling.md §10、§15）。
+    let idle = match thread::create_idle(thread::idle_main) {
+        Ok(idle) => idle,
+        Err(err) => {
+            kerror!("sched init FAILED: {err}");
+            finish(EXIT_VALUE_KERNEL_SCHED_FAILURE);
+        }
+    };
+    kinfo!("sched: 空闲线程 = 线程 {idle}；开始六步调度自检");
+    if let Err(err) = self_check::run() {
+        kerror!("sched self-check FAILED: {err}");
+        finish(EXIT_VALUE_KERNEL_SCHED_FAILURE);
+    }
+    let sched_stats = sched::stats();
+    kinfo!(
+        "sched: 自检 OK（tick {}, 切换 {}, 存活线程 {}）",
+        sched_stats.ticks,
+        sched_stats.switches,
+        sched_stats.live
+    );
+
+    // 退出协议（文档 §9.3）：报告之前关中断，避免时钟在报告与退出途中插入。
+    let _quiet = lock::critical();
+    kinfo!("timer: 中断已按退出协议关闭");
 
     kinfo!("self-check OK");
 

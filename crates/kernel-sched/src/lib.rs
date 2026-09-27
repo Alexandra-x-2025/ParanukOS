@@ -169,6 +169,20 @@ impl Scheduler {
         Ok(())
     }
 
+    /// 登记空闲线程：自动挑一个空槽，状态 `Ready` 且**不入队**。
+    ///
+    /// # Errors
+    /// 线程表已满时返回 [`SchedError::NoFreeSlot`]。
+    pub fn register_idle_any(&mut self) -> Result<usize, SchedError> {
+        let id = self
+            .states
+            .iter()
+            .position(|state| *state == ThreadState::Unused)
+            .ok_or(SchedError::NoFreeSlot)?;
+        self.register_idle(id)?;
+        Ok(id)
+    }
+
     /// 创建一个普通线程：占用最小的空槽，状态 `Ready` 并入队（队尾）。
     ///
     /// # Errors
@@ -446,6 +460,23 @@ mod tests {
             Err(SchedError::IdleAlreadyRegistered),
             "已登记空闲线程时优先报该错误"
         );
+    }
+
+    #[test]
+    fn register_idle_any_picks_a_free_slot_without_enqueuing() {
+        let mut sched = Scheduler::new();
+        sched.register_boot(0).expect("登记引导上下文");
+        let idle = sched.register_idle_any().expect("登记空闲线程");
+        assert_eq!(idle, 1);
+        assert_eq!(sched.idle(), 1);
+        assert_eq!(sched.state(1), Ok(ThreadState::Ready));
+        assert!(!sched.queued(1), "空闲线程不入队");
+        assert_eq!(sched.stats().ready, 0);
+        assert_eq!(
+            sched.register_idle_any(),
+            Err(SchedError::IdleAlreadyRegistered)
+        );
+        assert_invariants(&sched);
     }
 
     #[test]

@@ -121,8 +121,8 @@ bash tests/smoke.sh                                                       # QEMU
 
 ### 已知限制
 
-*   **目前只到 Milestone 0–3a。** 内核还没有线程：时钟在走，但没有任何东西被抢占（M3b 才补上
-    上下文切换、线程与回收）。
+*   **目前只到 Milestone 0–3。** 内核已经有线程：抢占式轮转调度、`yield`/`exit`、空闲线程、栈回收
+    与六步调度自检。还缺用户态、IPC 与按线程的地址空间（M4）。
 *   **目前只到 Milestone 0–2。** 引导器会装载内核、调用 `exit_boot_services` 并跳转到入口；
     内核随后校验 `BootInfo`、安装自己的 IDT 与页表、拉起页帧分配器与内核堆、在 COM1 打印摘要并
     退出。**尚无用户态、IPC 与调度** —— 顺序见 `docs/architecture/kernel_interface.md` §9。
