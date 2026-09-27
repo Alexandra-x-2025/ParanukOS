@@ -267,7 +267,8 @@ QEMU 的 `isa-debug-exit` 退出码 = `(value << 1) | 1`。
 | **39** | **内核自检失败** —— 内核判定自己无法继续（magic/version 不匹配、内存图缺失、无 RSDP） | **内核** | 已实现（M0） |
 | **41** | **内核未处理异常或 panic** —— CPU 异常（`#UD`、`#GP`、`#PF` 等）或 `panic!` | **内核** | 已实现（M1） |
 | **43** | **内核内存初始化失败** —— 页表、页帧分配器或堆；见 [memory_subsystem_CN.md](memory_subsystem_CN.md) §7.1 | **内核** | 已实现（M2） |
-| **45** | **内核调度自检失败** —— 描述符表、中断、锁或线程；见 [threads_and_scheduling_CN.md](threads_and_scheduling_CN.md) §9.1 | **内核** | 已实现（M3a） |
+| **45** | **内核调度自检失败** —— 描述符表、中断、锁或线程；见 [threads_and_scheduling_CN.md](threads_and_scheduling_CN.md) §9.1 | **内核** | 已实现（M3） |
+| **47** | **用户态服务故障** —— CPL 3 的异常或系统调用参数被拒绝；见 [user_mode_CN.md](user_mode_CN.md) §9 | **内核** | 保留（M4） |
 | 124 | 超时未退出（判为卡死） | — | 已实现（判失败） |
 
 **33 与 37 必须分开**：否则测试无法区分"引导器装完就停了"与"内核真的跑起来了"，
@@ -322,7 +323,7 @@ QEMU 的 `isa-debug-exit` 退出码 = `(value << 1) | 1`。
 | 7 | `isa-debug-exit` 端口不对 | `-device isa-debug-exit,iobase=0xf4,iosize=0x04` + `exit_port=0xf4` |
 | 8 | 内存图用 `sizeof` 而非 `desc_size` 遍历 | 按 §5.3 的告警执行 |
 
-## 9. 里程碑（M4 及以后为占位，**未设计**）
+## 9. 里程碑（M5 及以后为占位，**未设计**）
 
 | 里程碑 | 内容 | 前置 |
 |---|---|---|
