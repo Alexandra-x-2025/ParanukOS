@@ -18,8 +18,14 @@ use core::fmt;
 /// `BootInfo` 的 magic：`"Paranuk"` 的 ASCII 字节 + 接口版本 `0x01`。
 pub const BOOT_INFO_MAGIC: u64 = 0x5061_7261_6E75_6B01;
 
-/// 本 crate 实现的接口版本（对应 `docs/architecture/kernel_interface.md` 的 v0）。
-pub const BOOT_INFO_VERSION: u32 = 0;
+/// 本 crate 实现的接口版本（对应 `docs/architecture/user_mode.md` 的 v1）。
+///
+/// v1 = v0 的 88 字节前缀 + 4 个 `u64` 用户镜像字段（只追加，见 §5.5）。
+/// 内核仍然接受 v0：那表示"没有用户载荷"。
+pub const BOOT_INFO_VERSION: u32 = 1;
+
+/// v0 的结构体大小（没有用户镜像字段）。
+pub const BOOT_INFO_SIZE_V0: u32 = 88;
 
 /// 引导器与内核之间传递的启动信息。布局由 `#[repr(C)]` 固定，字段偏移有单元测试钉住。
 #[repr(C)]
@@ -58,6 +64,16 @@ pub struct BootInfo {
     pub exit_port: u32,
     /// 填充，保持 8 字节对齐；新增字段从这里之后开始。
     pub _reserved: u32,
+
+    // ---- v1：用户镜像（只追加，v0 的 88 字节前缀逐字节不变）----
+    /// 已装载用户镜像的物理起始地址。
+    pub user_phys: u64,
+    /// 用户镜像字节数（页对齐区间）。
+    pub user_size: u64,
+    /// 与 `user_phys` 对应的虚拟地址（用户区基址）。
+    pub user_vaddr: u64,
+    /// 用户入口点（镜像内的一个虚拟地址）。
+    pub user_entry: u64,
 }
 
 /// [`BootInfo::validate`] 的失败原因。
@@ -67,7 +83,7 @@ pub enum BootInfoError {
     WrongMagic { found: u64 },
     /// 接口版本不受支持。
     UnsupportedVersion { found: u32, supported: u32 },
-    /// `size` 小于本内核理解的 `BootInfo` 大小。
+    /// `size` 小于该版本必须包含的字段。
     TooSmall { size: u32, expected: u32 },
 }
 
@@ -105,18 +121,24 @@ impl BootInfo {
 
     /// 校验 magic、version 与 size。内核必须在做任何其他事情之前调用它。
     ///
-    /// 只检查头部：其余字段的可用性由各自的约定表达（例如 `mmap_len == 0` 表示内存图不可用）。
+    /// **同时接受 v0 与 v1**（`user_mode.md` §3，决策 #42）：v0 表示"没有用户载荷"。只检查头部：
+    /// 其余字段的可用性由各自的约定表达（例如 `mmap_len == 0` 表示内存图不可用、
+    /// [`Self::has_user_image`] 为假表示没有服务可跑）。
     pub fn validate(&self) -> Result<(), BootInfoError> {
         if self.magic != BOOT_INFO_MAGIC {
             return Err(BootInfoError::WrongMagic { found: self.magic });
         }
-        if self.version != BOOT_INFO_VERSION {
-            return Err(BootInfoError::UnsupportedVersion {
-                found: self.version,
-                supported: BOOT_INFO_VERSION,
-            });
-        }
-        let expected = core::mem::size_of::<Self>() as u32;
+        // v0 只需要 88 字节；v1 在其之上追加，因此用"该版本必须包含多少"来判断。
+        let expected = match self.version {
+            0 => BOOT_INFO_SIZE_V0,
+            BOOT_INFO_VERSION => core::mem::size_of::<Self>() as u32,
+            other => {
+                return Err(BootInfoError::UnsupportedVersion {
+                    found: other,
+                    supported: BOOT_INFO_VERSION,
+                });
+            }
+        };
         if self.size < expected {
             return Err(BootInfoError::TooSmall {
                 size: self.size,
@@ -124,6 +146,23 @@ impl BootInfo {
             });
         }
         Ok(())
+    }
+
+    /// 是否带有可运行的用户镜像（v1 且四个字段都有效）。
+    #[must_use]
+    pub fn has_user_image(&self) -> bool {
+        self.version >= 1
+            && self.size >= core::mem::size_of::<Self>() as u32
+            && self.user_phys != 0
+            && self.user_size != 0
+            && self.user_vaddr != 0
+            && self.user_entry != 0
+    }
+
+    /// 用户镜像区间 `[user_vaddr, user_vaddr + user_size)` 结束地址。
+    #[must_use]
+    pub fn user_vaddr_end(&self) -> u64 {
+        self.user_vaddr.saturating_add(self.user_size)
     }
 
     /// 内存图是否可用。
@@ -215,7 +254,74 @@ mod tests {
         assert_eq!(offset_of!(BootInfo, stack_size), 72);
         assert_eq!(offset_of!(BootInfo, exit_port), 80);
         assert_eq!(offset_of!(BootInfo, _reserved), 84);
-        assert_eq!(size_of::<BootInfo>(), 88);
+        // v1 追加的字段：v0 的 88 字节前缀逐字节不变（只追加，见 §5.5）。
+        assert_eq!(offset_of!(BootInfo, user_phys), 88);
+        assert_eq!(offset_of!(BootInfo, user_size), 96);
+        assert_eq!(offset_of!(BootInfo, user_vaddr), 104);
+        assert_eq!(offset_of!(BootInfo, user_entry), 112);
+        assert_eq!(size_of::<BootInfo>(), 120);
+    }
+
+    #[test]
+    fn a_v0_boot_info_is_still_accepted() {
+        // 老引导器（v0）必须仍然能启动新内核：v0 = 88 字节、没有用户字段。
+        let v0 = BootInfo {
+            version: 0,
+            size: BOOT_INFO_SIZE_V0,
+            ..BootInfo::new()
+        };
+        assert_eq!(v0.validate(), Ok(()));
+        assert!(!v0.has_user_image(), "v0 表示没有用户载荷");
+    }
+
+    #[test]
+    fn a_truncated_v1_is_rejected_and_a_future_version_too() {
+        let truncated = BootInfo {
+            version: 1,
+            size: BOOT_INFO_SIZE_V0,
+            ..BootInfo::new()
+        };
+        assert_eq!(
+            truncated.validate(),
+            Err(BootInfoError::TooSmall {
+                size: BOOT_INFO_SIZE_V0,
+                expected: 120
+            })
+        );
+        let future = BootInfo {
+            version: 2,
+            ..BootInfo::new()
+        };
+        assert_eq!(
+            future.validate(),
+            Err(BootInfoError::UnsupportedVersion {
+                found: 2,
+                supported: 1
+            })
+        );
+    }
+
+    #[test]
+    fn user_image_availability_requires_all_four_fields() {
+        let base = BootInfo::new();
+        assert!(!base.has_user_image(), "v1 的全零实例没有用户镜像");
+        let complete = BootInfo {
+            user_phys: 0x10_0000,
+            user_size: 0x2000,
+            user_vaddr: 0x1_0000_0000,
+            user_entry: 0x1_0000_0100,
+            ..base
+        };
+        assert!(complete.has_user_image());
+        assert_eq!(complete.user_vaddr_end(), 0x1_0000_2000);
+        for broken in [
+            BootInfo { user_phys: 0, ..complete },
+            BootInfo { user_size: 0, ..complete },
+            BootInfo { user_vaddr: 0, ..complete },
+            BootInfo { user_entry: 0, ..complete },
+        ] {
+            assert!(!broken.has_user_image());
+        }
     }
 
     #[test]
