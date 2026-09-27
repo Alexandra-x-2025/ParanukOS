@@ -133,6 +133,11 @@ pub fn critical() -> CriticalSection;             // cli, remember whether IF wa
 pub fn held_count() -> usize;
 ```
 
+The kernel is compiled with `-C no-redzone=yes` (`.cargo/config.toml`): the SysV red zone lets a
+callee keep data in the 128 bytes below `rsp`, and an interrupt's pushed frame lands exactly there.
+From M3 on interrupts are enabled, so leaving the red zone on would mean the timer silently
+corrupting live locals.
+
 The order matters: **disable interrupts first, then acquire the flag.** The reverse order leaves a
 window in which the interrupt handler could observe the lock as taken by a thread that has not
 actually entered the critical section yet.

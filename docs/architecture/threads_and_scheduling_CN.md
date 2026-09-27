@@ -123,6 +123,10 @@ pub fn critical() -> CriticalSection;             // cli，并记住 IF 原本�
 pub fn held_count() -> usize;
 ```
 
+内核用 `-C no-redzone=yes` 编译（`.cargo/config.toml`）：SysV 的红区允许被调用者在 `rsp` 之下
+128 字节内暂存数据，而中断压栈的帧正好落在那里。从 M3 起中断是开的，因此开着红区就等于让时钟
+随机踩坏还活着的局部变量。
+
 顺序很重要：**先关中断，再抢标志。** 反过来会留下一个窗口：中断处理器可能看到锁已被占用，而持有者
 其实还没真正进入临界区。
 
